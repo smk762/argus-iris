@@ -2,14 +2,34 @@
 
 VRAM-aware GPU lease broker for the Argus suite: priorities, schedules, keepalive and idle-kill across GPU nodes
 
-Status: design stage. See [DESIGN.md](DESIGN.md).
+Status: observe-only (rollout step 2). Agents report per-process VRAM, idle time and host RAM; the broker composes
+them with ComfyUI, Ollama and Argus service readings into residents and a per-node ledger. Nothing is admitted or
+evicted yet. See [DESIGN.md](DESIGN.md).
+
+## Run
+
+On each GPU host (see [deploy/agent.compose.yaml](deploy/agent.compose.yaml)):
+
+```bash
+IRIS_AGENT_NODE=morpheus IRIS_AGENT_TOKEN=... IRIS_AGENT_CONTAINERS=voluptas_comfyui argus-iris agent   # :9110
+```
+
+The agent needs `pid: host`, `cgroup: host`, NVML, the Docker socket and `/sys/fs/cgroup` read-only. Container actions are disabled
+unless `IRIS_AGENT_TOKEN` is set, and apply only to containers in `IRIS_AGENT_CONTAINERS`.
+
+The broker, on morpheus (see [deploy/iris.example.yaml](deploy/iris.example.yaml)):
+
+```bash
+argus-iris serve --config iris.yaml   # :8120 — /nodes, /residents, /events, /metrics, /health
+```
 
 Part of the [Argus suite](https://github.com/smk762?tab=repositories&q=argus).
 
 ## Install
 
 ```bash
-uv pip install argus-iris
+uv pip install 'argus-iris[server]'   # broker
+uv pip install 'argus-iris[agent]'    # node agent
 ```
 
 ## Develop

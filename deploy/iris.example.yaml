@@ -1,0 +1,64 @@
+# argus-iris broker config (observe-only release). Point IRIS_CONFIG at a copy of this file.
+# Hostnames are examples; use whatever resolves on your LAN.
+poll_s: 5
+agent_timeout_s: 3
+
+nodes:
+  morpheus:
+    agent_url: http://morpheus:9110
+    reserve_mb: 3500        # desktop display: never handed out
+  dragon:
+    agent_url: http://dragon:9110
+  jarrah:
+    agent_url: http://jarrah:9110
+
+# Services that hold residents. `container` matches the agent's GPU processes to the service; without it the
+# service's VRAM shows up as an unclaimed "process" resident instead.
+services:
+  - id: comfyui
+    node: morpheus
+    adapter: comfyui
+    base_url: http://morpheus:8188
+    container: voluptas_comfyui
+  # agent-composer binds Ollama to 127.0.0.1 unless OLLAMA_BIND_IP is set; the broker needs it on the LAN.
+  - id: ollama-dragon
+    node: dragon
+    adapter: ollama
+    base_url: http://dragon:11434
+    container: ollama
+  - id: ollama-jarrah
+    node: jarrah
+    adapter: ollama
+    base_url: http://jarrah:11434
+    container: ollama
+  # voluptas (smk762/voluptas#22): /health carries model_state, busy, idle_s; /admin/unload and /admin/wake.
+  - id: image-gen-diffusers
+    node: morpheus
+    adapter: argus-http
+    base_url: http://morpheus:8011
+    container: voluptas_image_gen_diffusers
+    warm_path: /admin/wake
+    token_env: ARGUS_ADMIN_TOKEN      # guards /admin/* when set; reads stay open
+  - id: miso
+    node: morpheus
+    adapter: argus-http
+    base_url: http://morpheus:8034
+    container: voluptas_miso
+    warm_path: /admin/wake
+
+  # agent-composer (smk762/agent-composer#44): the sidecars listen on loopback, so iris reaches them through
+  # rag-chat's resident gateway, which needs an API key as Bearer even for reads. Each sidecar's /health has a
+  # `gpu` block (loaded, model_state, idle_s). xtts, tts and modernbert also have /admin/evict (GPU -> CPU).
+  - { id: xtts, node: dragon, adapter: argus-http, container: xtts, warm_path: /admin/wake, evict_path: /admin/evict,
+      base_url: "http://dragon:9150/api/runtime/residents/xtts", token_env: RAG_CHAT_API_KEY }
+  - { id: tts, node: dragon, adapter: argus-http, container: tts, warm_path: /admin/wake, evict_path: /admin/evict,
+      base_url: "http://dragon:9150/api/runtime/residents/tts", token_env: RAG_CHAT_API_KEY }
+  - { id: whisper, node: dragon, adapter: argus-http, container: whisper, warm_path: /admin/wake,
+      base_url: "http://dragon:9150/api/runtime/residents/whisper", token_env: RAG_CHAT_API_KEY }
+  - { id: modernbert, node: dragon, adapter: argus-http, container: modernbert, warm_path: /admin/wake, evict_path: /admin/evict,
+      base_url: "http://dragon:9150/api/runtime/residents/modernbert", token_env: RAG_CHAT_API_KEY }
+  - { id: infinity, node: dragon, adapter: argus-http, container: infinity, warm_path: /admin/wake,
+      base_url: "http://dragon:9150/api/runtime/residents/infinity", token_env: RAG_CHAT_API_KEY }
+
+# Browser origins (the Studio page) allowed to make state-changing requests.
+trusted_origins: []
