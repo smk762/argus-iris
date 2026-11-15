@@ -254,5 +254,12 @@ class Broker:
         finally:
             self._subscribers.discard(queue)
 
+    @property
+    def client(self) -> httpx.AsyncClient:
+        return self._client
+
+    def adapter(self, service_id: str):
+        return self._adapters[service_id]
+
     def residents(self) -> list[Resident]:
         return [r for state in self.nodes.values() for r in state.residents]

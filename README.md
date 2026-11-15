@@ -4,7 +4,7 @@ VRAM-aware GPU lease broker for the Argus suite: priorities, schedules, keepaliv
 
 Status: observe-only (rollout step 2). Agents report per-process VRAM, idle time and host RAM; the broker composes
 them with ComfyUI, Ollama and Argus service readings into residents and a per-node ledger. Nothing is admitted or
-evicted yet. See [DESIGN.md](DESIGN.md).
+evicted yet; the one action is a manual warm (below). See [DESIGN.md](DESIGN.md).
 
 ## Run
 
@@ -22,6 +22,15 @@ The broker, on morpheus (see [deploy/iris.example.yaml](deploy/iris.example.yaml
 ```bash
 argus-iris serve --config iris.yaml   # :8120 — /nodes, /residents, /events, /metrics, /health
 ```
+
+One manual action exists: bring a service back up. If its health check fails, the node's agent starts its container
+(it must be on that agent's `IRIS_AGENT_CONTAINERS`), and iris waits for it to answer:
+
+```bash
+curl -X POST -H "Authorization: Bearer $ARGUS_GPU_BROKER_TOKEN" http://morpheus:8120/services/comfyui/warm
+```
+
+It needs `ARGUS_GPU_BROKER_TOKEN` (callers) and `IRIS_AGENT_TOKEN` (matching the agents') set on the broker.
 
 Part of the [Argus suite](https://github.com/smk762?tab=repositories&q=argus).
 
