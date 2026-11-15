@@ -251,3 +251,10 @@ def test_config_rejects_unknown_keys() -> None:
     svc = {**CONFIG["services"][0], "evict_paht": "/admin/unload"}
     with pytest.raises(ValidationError, match="evict_paht"):
         BrokerConfig.model_validate({**CONFIG, "services": [svc]})
+
+
+@pytest.mark.parametrize("path", ["admin/unload", "http://x/admin/unload", "/admin/un load"])
+def test_route_paths_must_be_absolute(path: str) -> None:
+    svc = {**CONFIG["services"][1], "unload_path": path}
+    with pytest.raises(ValidationError):
+        BrokerConfig.model_validate({**CONFIG, "services": [svc]})

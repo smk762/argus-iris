@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 DEFAULT_HEADROOM_MB = 512
+
+# Same rule as argus-cortex's TenantResident.RoutePath: an absolute path joined to base_url, never a URL.
+RoutePath = Annotated[str, Field(pattern=r"^/\S*$", max_length=200)]
 
 
 class NodeConfig(BaseModel):
@@ -43,10 +46,10 @@ class ServiceConfig(BaseModel):
     container: str | None = None
     # argus-http lifecycle routes, named as in argus-cortex's TenantResident (the contract of voluptas#22 and
     # agent-composer#44). unload frees VRAM and RAM; evict moves GPU -> CPU where the service has a CPU stage.
-    health_path: str = "/health"
-    unload_path: str | None = "/admin/unload"
-    evict_path: str | None = None
-    warm_path: str | None = None
+    health_path: RoutePath = "/health"
+    unload_path: RoutePath | None = "/admin/unload"
+    evict_path: RoutePath | None = None
+    warm_path: RoutePath | None = None
     # Name of an environment variable holding a bearer token sent on every request to this service (rag-chat's
     # resident gateway needs one even for reads; ARGUS_ADMIN_TOKEN guards /admin/*). Never the token itself.
     token_env: str | None = None
