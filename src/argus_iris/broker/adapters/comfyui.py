@@ -21,10 +21,10 @@ class ComfyUIAdapter:
         self.service = service
 
     async def read(self, client: httpx.AsyncClient) -> ServiceReading:
-        base = self.service.base_url
+        base, headers = self.service.base_url, self.service.headers()
         try:
             stats_resp, queue_resp = await asyncio.gather(
-                client.get(f"{base}/system_stats"), client.get(f"{base}/queue")
+                client.get(f"{base}/system_stats", headers=headers), client.get(f"{base}/queue", headers=headers)
             )
             stats_resp.raise_for_status()
             queue_resp.raise_for_status()

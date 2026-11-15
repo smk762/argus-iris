@@ -38,7 +38,12 @@ def _service_residents(
 ) -> list[Resident]:
     base_id = f"{node}/{svc.id}"
     proc_mb = sum(p.vram_mb for p in procs)
-    idle = None if reading.busy else _min_idle(procs)
+    if reading.busy:
+        idle = None
+    elif reading.idle_s is not None:
+        idle = reading.idle_s  # the service knows when it last served a request
+    else:
+        idle = _min_idle(procs)
     if svc.adapter == "ollama" and reading.models:
         return [
             Resident(

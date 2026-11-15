@@ -41,6 +41,13 @@ class ServiceConfig(BaseModel):
     health_path: str = "/health"
     evict_path: str | None = "/admin/unload"
     warm_path: str | None = None
+    # Name of an environment variable holding a bearer token sent on every request to this service (rag-chat's
+    # resident gateway needs one even for reads; ARGUS_ADMIN_TOKEN guards /admin/*). Never the token itself.
+    token_env: str | None = None
+
+    def headers(self) -> dict[str, str]:
+        token = os.environ.get(self.token_env, "") if self.token_env else ""
+        return {"Authorization": f"Bearer {token}"} if token else {}
 
     @field_validator("base_url")
     @classmethod

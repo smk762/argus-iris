@@ -33,7 +33,7 @@ class OllamaAdapter:
 
     async def read(self, client: httpx.AsyncClient) -> ServiceReading:
         try:
-            resp = await client.get(f"{self.service.base_url}/api/ps")
+            resp = await client.get(f"{self.service.base_url}/api/ps", headers=self.service.headers())
             resp.raise_for_status()
             data = resp.json()
         except (httpx.HTTPError, ValueError) as exc:

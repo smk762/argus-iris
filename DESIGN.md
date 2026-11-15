@@ -118,8 +118,11 @@ Units: every memory figure on the wire is MiB (NVML bytes / 2^20), named `*_mb` 
 
 Adapters are configured by tenant manifests, not hard-coded per service as gothmog was. The argus-http adapter's
 paths are per manifest, because the services that already have lifecycle endpoints spell them differently.
-agent-composer alone has XTTS and TTS (`/admin/evict|unload|wake`), its Infinity manager (`/admin/status|evict|wake`)
-and ModernBERT (`/model/status|load|evict`).
+agent-composer#44 and voluptas#22 converge on one contract: `/health` with `loaded`, `model_state`, `idle_s` (and
+`busy`), plus `POST /admin/unload|evict|wake`, guarded by `ARGUS_ADMIN_TOKEN` when it is set. agent-composer's
+sidecars listen on loopback, so iris reaches them through rag-chat's gateway at
+`<rag-chat>/api/runtime/residents/<name>`, which needs an API key as Bearer even for reads. A service's own `idle_s`
+takes precedence over the agent's process-level idle time.
 
 **ComfyUI specifics.** `POST /free` unloads every model at once, and stock ComfyUI has no endpoint that lists what is
 loaded, so for eviction ComfyUI is a single resident. The affinity bonus comes from the checkpoint and LoRAs of the last
@@ -329,14 +332,14 @@ Iris must not fight the per-repo mechanisms it replaces, so each one is handed o
 
 | Mechanism | Repo | Handover |
 |---|---|---|
-| `comfyui-cleanup` stop after `COMFYUI_IDLE_TIMEOUT_SECONDS` and RAM restart | voluptas | Today it `docker stop`s ComfyUI after 30 min idle and nothing restarts it. Until iris owns residency, iris's warm (agent `start`) brings it back on the next lease. Then set the stop timeout to `0` (disabled) and `COMFYUI_MEM_RESTART_MB=0` once the comfyui adapter owns idle-kill and the RAM restart. |
-| `comfyui_cleanup.sh` `POST /free` every 15 min | voluptas | It frees models whatever the queue holds, so it can unload a checkpoint a granted lease is about to use. Drop the `/free` call once iris owns residency; keep the history, output and temp cleanup, which iris does not do. |
+| `comfyui-cleanup` stop after `COMFYUI_IDLE_TIMEOUT_SECONDS` and RAM restart | voluptas | It used to `docker stop` ComfyUI after 30 min idle, and nothing started it again. voluptas#22 makes `0` mean disabled and the default. The #16 RAM restart stays until the comfyui adapter owns it; then set `COMFYUI_MEM_RESTART_MB=0`. |
+| `comfyui_cleanup.sh` `POST /free` every 15 min | voluptas | It freed models whatever the queue held. voluptas#22 skips `/free` while a job is queued. Set `COMFYUI_CLEANUP_FREE=0` once iris owns residency; the history, output and temp cleanup stay, since iris does not do them. |
 | `MISO_KEEP_ALIVE_GPU` / `_CPU` | voluptas (MisoTTS) | Leave it; register MisoTTS as an argus-http resident and let iris evict earlier when it needs the memory. |
-| per-request `keep_alive=15m` and `OLLAMA_KEEP_ALIVE=15m` | agent-composer | rag-chat and rag-ingest send it on every Ollama call, so any request re-pins its model whatever iris decided. Drop it from requests (or set it per model from the policy) so the server-side keep-alive iris sets is not overridden. |
+| per-request `keep_alive=15m` and `OLLAMA_KEEP_ALIVE=15m` | agent-composer | rag-chat and rag-ingest send it on every Ollama call, so any request re-pins its model whatever iris decided. agent-composer#44 adds `OLLAMA_KEEP_ALIVE=server`, which stops sending it. Switch to that when iris owns Ollama residency (step 4); the default stays `15m`. |
 | `/api/runtime/ollama/evict` with no model, `/ollama/wake` | agent-composer | The no-model evict unloads every loaded model, including other tenants'. Route both through iris's `/residents/{id}/evict` and `/warm`. |
-| Infinity manager idle reaper (`INFINITY_IDLE_TIMEOUT=300`) | agent-composer | Leave it; register Infinity as an argus-http resident (0.8 GiB loaded, 1.3 GiB peak, held until the process stops). |
+| Infinity manager idle reaper (`INFINITY_IDLE_TIMEOUT=300`) | agent-composer | Leave it; Infinity is an argus-http resident (0.8 GiB loaded, 1.3 GiB peak, held until the process stops). Since agent-composer#44 it answers 409 `busy` to an evict with requests in flight. |
 | `run_with_oom_wait` (retry on CUDA OOM for up to 180 s) | agent-composer | Keep it as the fallback when iris is down. A lease refusal must come back as a distinct error, not one shaped like an OOM, or the loop polls for 180 s. |
-| `STT_KEEP_ALIVE_GPU` | agent-composer (Whisper) | Leave it; Whisper has `/health` only, so it stays observed until it adds an unload endpoint. |
+| `STT_KEEP_ALIVE_GPU` | agent-composer (Whisper) | Leave it; agent-composer#44 gives Whisper `/admin/unload`, so iris can evict it earlier. |
 | `ARGUS_IDLE_UNLOAD_S` | argus-lens | Unset when lens runs with the broker coordinator. |
 | `MACHINE_LEARNING_MODEL_TTL` | Immich (mithrandir) | Set low; iris only observes it. |
 

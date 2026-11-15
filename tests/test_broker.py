@@ -196,3 +196,52 @@ def test_config_validation(tmp_path: Path) -> None:
 
 def test_example_config_loads() -> None:
     load_config(Path(__file__).parent.parent / "deploy" / "iris.example.yaml")
+
+
+def test_parse_health_reads_both_shapes() -> None:
+    from argus_iris.broker.adapters.http import parse_health
+
+    # voluptas image-gen-diffusers / argus-lens: top level
+    r = parse_health({"status": "ok", "model_state": "gpu", "busy": True, "idle_s": 3.5, "gpu": {"total_mb": 24576}})
+    assert (r.busy, r.idle_s, r.detail["model_state"]) == (True, 3.5, "gpu")
+    # agent-composer sidecar (directly or via rag-chat's gateway): a gpu block
+    r = parse_health(
+        {"status": "ok", "gpu": {"loaded": True, "model_state": "cpu", "idle_s": 120, "free_vram_mb": None}}
+    )
+    assert (r.busy, r.idle_s, r.detail) == (False, 120.0, {"loaded": True, "model_state": "cpu", "status": "ok"})
+    # unloaded: no idle figure
+    assert parse_health({"gpu": {"loaded": False, "idle_s": None}}).idle_s is None
+    assert parse_health("plain text").up
+
+
+async def test_service_idle_and_token(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_CHAT_TOKEN", "k3y")
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/snapshot"):
+            return httpx.Response(200, json=snapshot("dragon", 8188, 4000, [proc(7, 1300, "xtts", idle=2)]))
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"gpu": {"loaded": True, "model_state": "gpu", "idle_s": 900}})
+
+    cfg = BrokerConfig.model_validate(
+        {
+            "nodes": {"dragon": {"agent_url": "http://dragon:9110"}},
+            "services": [
+                {
+                    "id": "xtts",
+                    "node": "dragon",
+                    "adapter": "argus-http",
+                    "base_url": "http://dragon:9150/api/runtime/residents/xtts",
+                    "container": "xtts",
+                    "token_env": "RAG_CHAT_TOKEN",
+                }
+            ],
+        }
+    )
+    broker = Broker(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    await broker.poll_once()
+    (xtts,) = broker.nodes["dragon"].residents
+    assert seen == ["Bearer k3y"]
+    # The service's own idle time (900 s since its last request) beats the agent's (VRAM moved 2 s ago).
+    assert xtts.idle_s == 900 and xtts.vram_mb == 1300

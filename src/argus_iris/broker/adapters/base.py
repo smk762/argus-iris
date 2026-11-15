@@ -24,6 +24,7 @@ class ServiceReading:
     up: bool
     error: str | None = None
     busy: bool = False  # work in flight, whoever submitted it
+    idle_s: float | None = None  # the service's own "since last used", better than the agent's process view
     queue_running: int | None = None
     queue_pending: int | None = None
     models: list[ModelReading] = field(default_factory=list)
