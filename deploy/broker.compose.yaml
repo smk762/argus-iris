@@ -12,3 +12,10 @@ services:
       - ${IRIS_CONFIG_FILE:-./iris.yaml}:/etc/argus-iris/iris.yaml:ro
     environment:
       IRIS_CONFIG: /etc/argus-iris/iris.yaml
+      # Callers' token (what argus-cortex's client sends). Manual actions such as warm are disabled while unset.
+      ARGUS_GPU_BROKER_TOKEN: ${ARGUS_GPU_BROKER_TOKEN:-}
+      # Sent to the agents for container actions; must match each agent's IRIS_AGENT_TOKEN.
+      IRIS_AGENT_TOKEN: ${IRIS_AGENT_TOKEN:-}
+      # Tokens the example config's token_env entries name.
+      ARGUS_ADMIN_TOKEN: ${ARGUS_ADMIN_TOKEN:-}
+      RAG_CHAT_API_KEY: ${RAG_CHAT_API_KEY:-}

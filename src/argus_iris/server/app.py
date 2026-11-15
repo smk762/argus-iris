@@ -8,17 +8,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
+import os
 from collections.abc import AsyncIterator
 
 import structlog
 from argus_cortex.server import WriteGuard, cross_site_refuse
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from prometheus_client.core import GaugeMetricFamily
 
 import argus_iris
+from argus_iris.broker.actions import ActionError, WarmResult, warm_service
 from argus_iris.broker.config import BrokerConfig, load_config
 from argus_iris.broker.state import Broker
 from argus_iris.models import NodeState, Resident
@@ -144,6 +147,23 @@ def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = No
     @app.get("/metrics")
     async def metrics() -> Response:
         return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+
+    def require_caller(authorization: str | None) -> None:
+        token = os.environ.get(config.caller_token_env, "")
+        if not token:
+            raise HTTPException(403, f"manual actions are disabled: {config.caller_token_env} is not set")
+        scheme, _, presented = (authorization or "").partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(presented.encode(), token.encode()):
+            raise HTTPException(401, "bad or missing bearer token", headers={"WWW-Authenticate": "Bearer"})
+
+    @app.post("/services/{service_id}/warm", response_model=WarmResult)
+    async def warm(service_id: str, authorization: str | None = Header(default=None)) -> WarmResult:
+        """Bring a service back: start its container through the agent if it is down, then call its warm_path."""
+        require_caller(authorization)
+        try:
+            return await warm_service(broker, service_id)
+        except ActionError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
 
     @app.get("/config")
     async def show_config() -> dict:

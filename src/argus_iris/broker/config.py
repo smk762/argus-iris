@@ -73,6 +73,12 @@ class BrokerConfig(BaseModel):
     services: list[ServiceConfig] = Field(default_factory=list)
     # Browser origins allowed to make state-changing requests (the Studio page). Non-browser clients are unaffected.
     trusted_origins: list[str] = Field(default_factory=list)
+    # Env vars holding the tokens (never the tokens themselves). The caller token is what argus-cortex's client sends
+    # (ARGUS_GPU_BROKER_TOKEN); manual actions are disabled until it is set. The agent token is sent to the agents.
+    caller_token_env: str = "ARGUS_GPU_BROKER_TOKEN"
+    agent_token_env: str = "IRIS_AGENT_TOKEN"
+    # How long a warm waits for a started service to answer its health check.
+    warm_timeout_s: float = Field(180.0, gt=0, le=900)
 
     @model_validator(mode="after")
     def _check(self) -> BrokerConfig:

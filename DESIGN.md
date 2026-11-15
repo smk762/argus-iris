@@ -288,7 +288,8 @@ through cortex's `WriteGuard` and take an optional `Authorization: Bearer <ARGUS
 | `POST` | `/leases/{id}/release` | `LeaseRelease` (`outcome` ok / failed / oom / cancelled, `peak_vram_mb`, `detail`). `cancelled` on a queued lease drops it from the queue. |
 | `POST` | `/tenants` | Register a `TenantManifest`. |
 | `GET` | `/nodes`, `/residents`, `/queue`, `/stats` | State for the dashboard and for operators. |
-| `POST` | `/residents/{id}/evict`, `/residents/{id}/warm` | Manual actions from the dashboard. |
+| `POST` | `/services/{id}/warm` | Manual: start the service's container through its agent if the service is down, wait for its health check, then call its `warm_path`. A stopped service has no resident, so this targets the service. |
+| `POST` | `/residents/{id}/evict` | Manual eviction from the dashboard (step 4). |
 | `GET` | `/events` | SSE stream of every state change, for the Studio page. |
 | `GET` | `/metrics` | Prometheus (gothmog's gauges plus queue, wait and eviction counters). |
 | `GET` | `/health` | Liveness and the reachability of each agent. |
@@ -349,7 +350,7 @@ A Studio page, fed by `/events` and `/stats`:
 
 - per node: VRAM bar split into leases, residents, reserve and free; host RAM; agent reachability
 - queue per class with wait times and position, and the lease each job is waiting on
-- residents with idle time, keepalive window, and evict / warm buttons
+- residents with idle time, keepalive window, and evict buttons; services with a warm button
 - history: waits, evictions, OOM refusals, learned vs declared footprints per tenant
 
 Prometheus `/metrics` remains for Grafana.

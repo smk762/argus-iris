@@ -32,9 +32,11 @@ Not checked out? Read https://github.com/smk762/argus-cortex/blob/dev/SUITE.md
   memory, `docker.py` is a minimal Engine API client over the Unix socket, `app.py` serves `/snapshot`, `/metrics`,
   `/health` and token- and allowlist-gated `POST /containers/{name}/{start|stop|restart}`.
 - `broker/` — `config.py` (YAML, `IRIS_CONFIG`), `adapters/` (comfyui, ollama, argus-http; read-only),
-  `state.py` (`Broker` polls agents and adapters; `compose_node` is the pure accounting).
+  `state.py` (`Broker` polls agents and adapters; `compose_node` is the pure accounting), `actions.py` (manual
+  warm: agent starts the container, wait for health, call `warm_path`).
 - `server/app.py` — the broker API (`[server]` extra, `argus-iris serve`, :8120): `/nodes`, `/residents`, `/events`
-  (SSE), `/metrics`, `/health`. Wrapped in cortex's `WriteGuard`.
+  (SSE), `/metrics`, `/health`, and `POST /services/{id}/warm` (needs `ARGUS_GPU_BROKER_TOKEN`). Wrapped in cortex's
+  `WriteGuard`.
 - `cli.py` — Typer app; entry point `argus-iris` (`serve`, `agent`, `version`).
 - `deploy/` — example broker config and compose files for the broker and the agents.
 
