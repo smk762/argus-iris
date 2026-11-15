@@ -49,13 +49,13 @@ services:
   # agent-composer (smk762/agent-composer#44): the sidecars listen on loopback, so iris reaches them through
   # rag-chat's resident gateway, which needs an API key as Bearer even for reads. Each sidecar's /health has a
   # `gpu` block (loaded, model_state, idle_s). xtts, tts and modernbert also have /admin/evict (GPU -> CPU).
-  - { id: xtts, node: dragon, adapter: argus-http, container: xtts, warm_path: /admin/wake,
+  - { id: xtts, node: dragon, adapter: argus-http, container: xtts, warm_path: /admin/wake, evict_path: /admin/evict,
       base_url: "http://dragon:9150/api/runtime/residents/xtts", token_env: RAG_CHAT_API_KEY }
-  - { id: tts, node: dragon, adapter: argus-http, container: tts, warm_path: /admin/wake,
+  - { id: tts, node: dragon, adapter: argus-http, container: tts, warm_path: /admin/wake, evict_path: /admin/evict,
       base_url: "http://dragon:9150/api/runtime/residents/tts", token_env: RAG_CHAT_API_KEY }
   - { id: whisper, node: dragon, adapter: argus-http, container: whisper, warm_path: /admin/wake,
       base_url: "http://dragon:9150/api/runtime/residents/whisper", token_env: RAG_CHAT_API_KEY }
-  - { id: modernbert, node: dragon, adapter: argus-http, container: modernbert, warm_path: /admin/wake,
+  - { id: modernbert, node: dragon, adapter: argus-http, container: modernbert, warm_path: /admin/wake, evict_path: /admin/evict,
       base_url: "http://dragon:9150/api/runtime/residents/modernbert", token_env: RAG_CHAT_API_KEY }
   - { id: infinity, node: dragon, adapter: argus-http, container: infinity, warm_path: /admin/wake,
       base_url: "http://dragon:9150/api/runtime/residents/infinity", token_env: RAG_CHAT_API_KEY }

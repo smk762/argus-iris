@@ -11,12 +11,14 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 DEFAULT_HEADROOM_MB = 512
 
 
 class NodeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     agent_url: str
     reserve_mb: int = 0  # memory iris never hands out (morpheus's desktop display)
     headroom_mb: int = DEFAULT_HEADROOM_MB  # CUDA contexts and estimates that run small
@@ -31,15 +33,19 @@ class NodeConfig(BaseModel):
 class ServiceConfig(BaseModel):
     """A service on a node that holds residents, read through an adapter."""
 
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     node: str
     adapter: Literal["comfyui", "ollama", "argus-http"]
     base_url: str
     # Container name on the node, to match the agent's GPU processes to this service (and, later, to warm it).
     container: str | None = None
-    # argus-http only: lifecycle paths differ between services.
+    # argus-http lifecycle routes, named as in argus-cortex's TenantResident (the contract of voluptas#22 and
+    # agent-composer#44). unload frees VRAM and RAM; evict moves GPU -> CPU where the service has a CPU stage.
     health_path: str = "/health"
-    evict_path: str | None = "/admin/unload"
+    unload_path: str | None = "/admin/unload"
+    evict_path: str | None = None
     warm_path: str | None = None
     # Name of an environment variable holding a bearer token sent on every request to this service (rag-chat's
     # resident gateway needs one even for reads; ARGUS_ADMIN_TOKEN guards /admin/*). Never the token itself.
@@ -56,6 +62,8 @@ class ServiceConfig(BaseModel):
 
 
 class BrokerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     poll_s: float = 5.0
     agent_timeout_s: float = 3.0
     nodes: dict[str, NodeConfig]

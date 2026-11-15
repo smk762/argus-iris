@@ -245,3 +245,9 @@ async def test_service_idle_and_token(monkeypatch) -> None:
     assert seen == ["Bearer k3y"]
     # The service's own idle time (900 s since its last request) beats the agent's (VRAM moved 2 s ago).
     assert xtts.idle_s == 900 and xtts.vram_mb == 1300
+
+
+def test_config_rejects_unknown_keys() -> None:
+    svc = {**CONFIG["services"][0], "evict_paht": "/admin/unload"}
+    with pytest.raises(ValidationError, match="evict_paht"):
+        BrokerConfig.model_validate({**CONFIG, "services": [svc]})
