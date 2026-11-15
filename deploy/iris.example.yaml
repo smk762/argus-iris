@@ -1,0 +1,40 @@
+# argus-iris broker config (observe-only release). Point IRIS_CONFIG at a copy of this file.
+# Hostnames are examples; use whatever resolves on your LAN.
+poll_s: 5
+agent_timeout_s: 3
+
+nodes:
+  morpheus:
+    agent_url: http://morpheus:9110
+    reserve_mb: 3500        # desktop display: never handed out
+  dragon:
+    agent_url: http://dragon:9110
+  jarrah:
+    agent_url: http://jarrah:9110
+
+# Services that hold residents. `container` matches the agent's GPU processes to the service; without it the
+# service's VRAM shows up as an unclaimed "process" resident instead.
+services:
+  - id: comfyui
+    node: morpheus
+    adapter: comfyui
+    base_url: http://morpheus:8188
+    container: voluptas_comfyui
+  # agent-composer binds Ollama to 127.0.0.1 unless OLLAMA_BIND_IP is set; the broker needs it on the LAN.
+  - id: ollama-dragon
+    node: dragon
+    adapter: ollama
+    base_url: http://dragon:11434
+    container: ollama
+  - id: ollama-jarrah
+    node: jarrah
+    adapter: ollama
+    base_url: http://jarrah:11434
+    container: ollama
+# agent-composer's Infinity (container `infinity`) listens on 127.0.0.1:7997 only, so the broker on morpheus cannot
+# read it; the agent still sees its VRAM as an unclaimed process. To manage it, expose it on the LAN and add:
+#  - { id: infinity, node: dragon, adapter: argus-http, base_url: "http://dragon:7997", container: infinity,
+#      health_path: /admin/status, evict_path: /admin/evict, warm_path: /admin/wake }
+
+# Browser origins (the Studio page) allowed to make state-changing requests.
+trusted_origins: []

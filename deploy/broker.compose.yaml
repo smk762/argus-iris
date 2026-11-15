@@ -1,0 +1,14 @@
+# argus-iris broker, on morpheus. `docker compose -f deploy/broker.compose.yaml up -d`
+# (a2f holds :8110 on morpheus, hence 8120.)
+services:
+  argus-iris:
+    image: ghcr.io/smk762/argus-iris:${IRIS_TAG:-latest}
+    container_name: argus-iris
+    command: ["argus-iris", "serve"]
+    restart: unless-stopped
+    ports:
+      - "${HOST_IP:-0.0.0.0}:8120:8120"
+    volumes:
+      - ${IRIS_CONFIG_FILE:-./iris.yaml}:/etc/argus-iris/iris.yaml:ro
+    environment:
+      IRIS_CONFIG: /etc/argus-iris/iris.yaml

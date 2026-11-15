@@ -15,8 +15,9 @@ RUN apt-get update \
 
 COPY . .
 
-RUN uv pip install --system --no-cache ".[server]"
+# One image for both roles: the broker (`argus-iris serve`, :8120) and the per-host agent (`argus-iris agent`, :9110).
+RUN uv pip install --system --no-cache ".[server,agent,cli]"
 
-EXPOSE 8000
-CMD ["uvicorn", "argus_iris.server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8120 9110
+CMD ["argus-iris", "serve"]
 
