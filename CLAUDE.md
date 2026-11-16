@@ -32,6 +32,8 @@ Not checked out? Read https://github.com/smk762/argus-cortex/blob/dev/SUITE.md
   memory, `docker.py` is a minimal Engine API client over the Unix socket, `app.py` serves `/snapshot`, `/metrics`,
   `/health` and token- and allowlist-gated `POST /containers/{name}/{start|stop|restart}`.
 - `broker/` — `config.py` (YAML, `IRIS_CONFIG`), `adapters/` (comfyui, ollama, argus-http; read-only),
+  argus-http validates `/health` as cortex's `ResidentHealth` and reads older shapes best-effort, logging
+  `resident_off_contract` (and `detail.off_contract` on the resident); a truthy non-bool `busy` counts as busy,
   `state.py` (`Broker` polls agents and adapters; `compose_node` is the pure accounting), `actions.py` (manual
   warm: agent starts the container, wait for health, call `warm_path`).
 - `server/app.py` — the broker API (`[server]` extra, `argus-iris serve`, :8120): `/nodes`, `/residents`, `/events`
@@ -68,6 +70,15 @@ Run one test: `uv run --no-sync pytest tests/test_x.py::test_name -q`.
 - **Memory is MiB** everywhere (`*_mb`), times are aware UTC.
 - **Don't 4xx for "busy"** on lease routes: cortex's client treats any 4xx other than 404 as a caller error. Busy is
   `queued`.
+
+## Branches
+
+`dev` is the default branch and the base for every PR, as in the rest of the suite. Cut feature branches from
+`origin/dev` and bring them up to date by merging `origin/dev`, never `main`. Never push work to `main` or open a PR
+against it, except the release PR from `dev`: `main` must never be ahead of `dev`. A release fast-forwards `main` to a
+`dev` commit that passed CI (`git push origin origin/dev:main`), then tags `vX.Y.Z` on it. If `main` is protected, the
+release is a reviewed PR from `dev` into `main`; its merge commit is the one thing `main` may have that `dev` lacks
+(same tree). Leave it there and don't merge `main` back into `dev`.
 
 ## CI / release
 

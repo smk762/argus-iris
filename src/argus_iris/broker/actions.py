@@ -11,10 +11,12 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from typing import TypeVar
 
 import httpx
 import structlog
-from pydantic import BaseModel
+from argus_cortex.gpu_wire import ResidentActionReply, ResidentBusyReply
+from pydantic import BaseModel, ValidationError
 
 from argus_iris.broker.config import ServiceConfig
 from argus_iris.broker.state import Broker
@@ -22,6 +24,8 @@ from argus_iris.broker.state import Broker
 log = structlog.get_logger("argus_iris.actions")
 
 WARM_POLL_S = 2.0
+
+_M = TypeVar("_M", ResidentActionReply, ResidentBusyReply)
 
 
 class ActionError(RuntimeError):
@@ -37,6 +41,7 @@ class WarmResult(BaseModel):
     node: str
     started_container: bool = False  # the agent started it
     warmed: bool = False  # warm_path was called
+    model_state: str | None = None  # from the wake reply (ResidentActionReply), when the service sends one
     up: bool
     waited_s: float = 0.0
     detail: str | None = None
@@ -63,6 +68,14 @@ async def _start_container(broker: Broker, svc: ServiceConfig) -> None:
         except ValueError:
             detail = resp.text[:200]
         raise ActionError(f"agent on {svc.node} refused to start {svc.container}: HTTP {resp.status_code} {detail}")
+
+
+def _reply(resp: httpx.Response, model: type[_M]) -> _M | None:
+    """The reply as the resident contract's model, or None when the service does not follow it yet."""
+    try:
+        return model.model_validate(resp.json())
+    except (ValueError, ValidationError):
+        return None
 
 
 async def warm_service(broker: Broker, service_id: str, *, poll_s: float | None = None) -> WarmResult:
@@ -100,9 +113,18 @@ async def warm_service(broker: Broker, service_id: str, *, poll_s: float | None 
             )
         except httpx.HTTPError as exc:
             raise ActionError(f"{svc.id} {svc.warm_path} failed: {exc}") from exc
+        if resp.status_code == 409:
+            busy = _reply(resp, ResidentBusyReply)
+            running = f"{busy.active} running" if busy else resp.text[:200]
+            raise ActionError(f"{svc.id} is busy ({running}): nothing was done; retry after the work finishes", 409)
         if resp.status_code >= 400:
             raise ActionError(f"{svc.id} {svc.warm_path}: HTTP {resp.status_code} {resp.text[:200]}")
         result.warmed = True
+        reply = _reply(resp, ResidentActionReply)
+        if reply is not None:
+            result.model_state = reply.model_state
+        else:
+            log.warning("resident_off_contract", service=svc.id, route=svc.warm_path, body=resp.text[:200])
     if not result.started_container and not result.warmed:
         result.detail = "already up"
     log.info("warm_done", **result.model_dump())
