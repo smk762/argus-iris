@@ -151,9 +151,27 @@ function renderResidents(node, state) {
       el("td", { class: "meta", text: r.source }),
       el("td", { class: "num", text: gb(r.vram_mb) }),
       el("td", { class: "num", "data-idle": idle ?? "", "data-at": Date.now(), text: dur(idle) }),
-      el("td", { class: `state ${r.busy ? "busy" : ""}`, text: st + exp }));
-  }) : [el("tr", {}, el("td", { colSpan: 6, class: "none", text: "nothing resident" }))]));
+      el("td", { class: `state ${r.busy ? "busy" : ""}`, text: st + exp }),
+      evictCell(r));
+  }) : [el("tr", {}, el("td", { colSpan: 7, class: "none", text: "nothing resident" }))]));
 }
+
+// Residents iris can evict: those read through an adapter, while they hold VRAM. Observed processes have none.
+function evictCell(r) {
+  const cell = el("td", {});
+  const freed = ["unloaded", "cpu"].includes(r.detail?.model_state);
+  if (r.source === "process" || freed) return cell;
+  const btn = el("button", { type: "button", class: "btn ghost", text: "Evict", disabled: r.busy,
+    title: r.busy ? "busy: iris never interrupts work" : "free its VRAM (to CPU where the service can, else unload)" });
+  btn.addEventListener("click", () => runAction(`residents/${r.id.split("/").map(encodeURIComponent).join("/")}/evict`, r.id,
+    btn, cell, "Evict", "Evicting…", evictSummary));
+  cell.append(btn);
+  const prev = lastResult.get(r.id);
+  if (prev) cell.append(prev.cloneNode(true));
+  return cell;
+}
+const evictSummary = (b) => `${b.action === "evict" ? "moved to CPU" : "unloaded"}: ${gb(b.before_mb - b.after_mb)} freed`
+  + (b.residual_mb ? `, ${gb(b.residual_mb)} still held (restart frees it)` : "") + (b.confirmed ? "" : " (not confirmed)");
 
 function renderServices(node, state) {
   const tbody = $("table.services tbody", node);
@@ -167,7 +185,7 @@ function renderServices(node, state) {
     const act = el("td", {});
     if (canWarm) {
       const btn = el("button", { type: "button", class: "btn ghost", text: "Warm", title: warmHint(c) });
-      btn.addEventListener("click", () => warm(s.id, btn, act));
+      btn.addEventListener("click", () => runAction(`services/${encodeURIComponent(s.id)}/warm`, s.id, btn, act, "Warm", "Warming…", warmSummary));
       act.append(btn);
       const prev = lastResult.get(s.id);
       if (prev) act.append(prev.cloneNode(true));
@@ -270,32 +288,28 @@ setInterval(() => {
 }, 1000);
 
 // ---------- warm ----------
-const lastResult = new Map(); // service -> result element (kept across re-renders)
-async function warm(id, btn, cell) {
+const lastResult = new Map(); // service or resident id -> result element (kept across re-renders)
+const warmSummary = (b) => (b.up ? "" : "still down: ")
+  + (b.detail ?? [b.started_container && "container started", b.warmed && "warmed", `up after ${b.waited_s.toFixed(1)}s`].filter(Boolean).join(", "));
+async function runAction(path, key, btn, cell, label, busyLabel, summary) {
   let token = sessionStorage.getItem(TOKEN_KEY);
   if (!token) token = await askToken();
   if (!token) return;
   btn.disabled = true;
-  btn.textContent = "Warming…";
+  btn.textContent = busyLabel;
   let msg;
   try {
-    const res = await fetch(api(`services/${encodeURIComponent(id)}/warm`), {
-      method: "POST", headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await fetch(api(path), { method: "POST", headers: { Authorization: `Bearer ${token}` } });
     const body = await res.json().catch(() => ({}));
     if (res.status === 401) sessionStorage.removeItem(TOKEN_KEY);
-    if (res.ok) {
-      const bits = [body.started_container && "container started", body.warmed && "warmed", `up after ${body.waited_s.toFixed(1)}s`];
-      msg = el("span", { class: `result ${body.up ? "ok" : "err"}`, text: (body.up ? "" : "still down: ") + (body.detail ?? bits.filter(Boolean).join(", ")) });
-    } else {
-      msg = el("span", { class: "result err", text: `${res.status}: ${body.detail ?? res.statusText}` });
-    }
+    const ok = res.ok && body.up !== false && body.confirmed !== false;
+    msg = el("span", { class: `result ${ok ? "ok" : "err"}`, text: res.ok ? summary(body) : `${res.status}: ${body.detail ?? res.statusText}` });
   } catch (e) {
     msg = el("span", { class: "result err", text: String(e) });
   }
-  lastResult.set(id, msg);
+  lastResult.set(key, msg);
   btn.disabled = false;
-  btn.textContent = "Warm";
+  btn.textContent = label;
   cell.querySelector(".result")?.remove();
   cell.append(msg.cloneNode(true));
 }

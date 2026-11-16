@@ -34,7 +34,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_l
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 import argus_iris
-from argus_iris.broker.actions import ActionError, WarmResult, warm_service
+from argus_iris.broker.actions import ActionError, EvictMode, EvictResult, WarmResult, evict_resident, warm_service
 from argus_iris.broker.config import BrokerConfig, load_config
 from argus_iris.broker.leases import LeaseRecord
 from argus_iris.broker.state import Broker
@@ -217,6 +217,18 @@ def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = No
         check_caller(authorization, required=True)
         try:
             return await warm_service(broker, service_id)
+        except ActionError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+
+    @app.post("/residents/{resident_id:path}/evict", response_model=EvictResult)
+    async def evict(
+        resident_id: str, mode: EvictMode = "auto", authorization: str | None = Header(default=None)
+    ) -> EvictResult:
+        """Free a resident's VRAM through its adapter: ``evict`` moves it to the CPU where the service can, ``unload``
+        drops it, ``auto`` prefers evict. Refused with 409 while it is busy. Waits to see the memory come back."""
+        check_caller(authorization, required=True)
+        try:
+            return await evict_resident(broker, resident_id, mode=mode, reason="manual")
         except ActionError as exc:
             raise HTTPException(exc.status, str(exc)) from exc
 

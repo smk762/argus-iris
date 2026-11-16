@@ -38,12 +38,13 @@ admission; nothing evicts yet.
   `state.py` (`Broker` polls agents and adapters, ticks the lease book every second; `compose_node` is the pure
   accounting), `leases.py` (`LeaseBook`: tenants, placement via `place()`, request_id idempotency, `resume`,
   heartbeat/TTL expiry, the 30 s first-beat reclaim, unpolled-queue drop; synchronous with an injectable clock, so test
-  it by moving the clock and calling `tick()`), `actions.py` (manual warm: agent starts the container, wait for
-  health, call `warm_path`).
+  it by moving the clock and calling `tick()`), `actions.py` (warm: agent starts the container, wait for health, call `warm_path`;
+  `evict_resident`: adapter route per source, 409 while busy, confirmed by the GPU's NVML free memory rising by half
+  the resident's VRAM, not by the service's word; reports `residual_mb`).
 - `server/app.py` — the broker API (`[server]` extra, `argus-iris serve`, :8120): `/nodes`, `/residents`, `/events`
   (SSE: `node` and `lease` events), `/metrics`, `/health`, `/ui/`, the lease routes (`POST /tenants`, `POST /leases`,
   `GET /leases/{id}?wait_s=`, `.../heartbeat`, `.../release`, `GET /leases`, `/queue`, `/tenants`; bearer token
-  checked only when `ARGUS_GPU_BROKER_TOKEN` is set) and `POST /services/{id}/warm` (needs that token). Wrapped in
+  checked only when `ARGUS_GPU_BROKER_TOKEN` is set) `POST /services/{id}/warm` and `POST /residents/{id}/evict` (resident ids contain slashes; both need that token). Wrapped in
   cortex's `WriteGuard`. Test the lease routes with cortex's own `BrokerCoordinator` over `httpx.ASGITransport`.
 - `ui/` — the dashboard, served by the broker at `/ui/` (`/` redirects). Plain HTML and ES modules with no build
   step, shipped in the wheel (the pattern argus-mask and argus-survey use). It is a thin client over `/health`,

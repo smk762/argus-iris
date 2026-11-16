@@ -226,19 +226,28 @@ class Broker:
             last_seen=self._last_seen.get(name),
         )
 
+    def _apply(self, name: str, state: NodeState) -> None:
+        was = self.nodes.get(name)
+        if was and was.reachable != state.reachable:
+            log.info("agent_reachability", node=name, reachable=state.reachable, error=state.error)
+        self.nodes[name] = state
+        fingerprint = _volatile_free(state)
+        if self._fingerprints.get(name) != fingerprint:
+            self._fingerprints[name] = fingerprint
+            self._publish(("node", state))
+
     async def poll_once(self) -> None:
         names = list(self.config.nodes)
         states = await asyncio.gather(*(self._poll_node(n, self.config.nodes[n]) for n in names))
         for name, state in zip(names, states, strict=True):
-            was = self.nodes.get(name)
-            if was and was.reachable != state.reachable:
-                log.info("agent_reachability", node=name, reachable=state.reachable, error=state.error)
-            self.nodes[name] = state
-            fingerprint = _volatile_free(state)
-            if self._fingerprints.get(name) != fingerprint:
-                self._fingerprints[name] = fingerprint
-                self._publish(("node", state))
+            self._apply(name, state)
         self.polls += 1
+
+    async def refresh(self, name: str) -> NodeState:
+        """Poll one node now (after an action, to see its effect) and publish the change."""
+        state = await self._poll_node(name, self.config.nodes[name])
+        self._apply(name, state)
+        return state
 
     async def run(self) -> None:
         await asyncio.gather(self._poll_loop(), self._tick_loop())
