@@ -195,8 +195,12 @@ class Broker:
         self._subscribers: set[asyncio.Queue[Event]] = set()
         self.polls = 0
         self.leases = LeaseBook(
-            config, lambda: self.nodes, on_change=lambda rec: self._publish(("lease", rec.model_copy()))
+            config,
+            lambda: self.nodes,
+            on_change=lambda rec: self._publish(("lease", rec.model_copy())),
+            evict=self._start_eviction,
         )
+        self._tasks: set[asyncio.Task] = set()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -267,6 +271,29 @@ class Broker:
                 self.leases.tick()
             except Exception:  # noqa: BLE001 - a bad tick must not stop expiry for good
                 log.exception("lease_tick_failed")
+
+    def _start_eviction(self, lease_id: str, resident_ids: list[str]) -> None:
+        task = asyncio.get_running_loop().create_task(self._evict_for(lease_id, resident_ids), name=f"evict-{lease_id}")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _evict_for(self, lease_id: str, resident_ids: list[str]) -> None:
+        """Admission's eviction plan, one resident at a time; then let the lease book serve its queue again."""
+        from argus_iris.broker.actions import ActionError, evict_resident  # noqa: PLC0415 - actions imports this module
+
+        failed: list[str] = []
+        try:
+            for rid in resident_ids:
+                try:
+                    result = await evict_resident(self, rid, reason=f"admission: lease {lease_id}")
+                except ActionError as exc:
+                    log.warning("admission_evict_failed", lease=lease_id, resident=rid, error=str(exc))
+                    failed.append(rid)
+                else:
+                    if not result.confirmed:
+                        failed.append(rid)
+        finally:
+            self.leases.evictions_done(lease_id, failed)
 
     def _publish(self, event: Event) -> None:
         for queue in list(self._subscribers):

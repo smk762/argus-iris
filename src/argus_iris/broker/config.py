@@ -81,6 +81,15 @@ class BrokerConfig(BaseModel):
     warm_timeout_s: float = Field(180.0, gt=0, le=900)
     # How long an evict waits to see the memory come back on the agent's NVML view.
     evict_confirm_s: float = Field(30.0, gt=0, le=300)
+    # Admission: "observe" grants every lease at once and records whether it would have fit; "enforce" queues leases
+    # that do not fit, spills to the next candidate node, and evicts idle residents to make room (DESIGN.md).
+    admission: Literal["observe", "enforce"] = "observe"
+    # A resident must have been idle this long before admission evicts it (so a model is not evicted between two
+    # requests of one conversation).
+    admission_min_idle_s: float = Field(60.0, ge=0)
+    # Resident ids (fnmatch patterns) admission never evicts, e.g. "dragon/ollama-dragon/hf.co/inclusionAI/SingGuard-*".
+    # The policy file of rollout step 4 adds windows; this is the always-pinned part.
+    pinned: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check(self) -> BrokerConfig:

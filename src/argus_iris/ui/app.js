@@ -256,7 +256,9 @@ function renderLeases(name) {
       el("td", { class: "meta", text: l.priority + (l.preemptible ? " · preemptible" : "") }),
       el("td", { class: "num", text: l.vram_mb ? gb(l.vram_mb) : "–" }),
       el("td", { class: "num", "data-idle": since(from) ?? "", "data-at": Date.now(), text: dur(since(from)) }),
-      el("td", { class: `state ${over ? "busy" : ""}`, title: why || null, text: st }));
+      el("td", { class: `state ${over ? "busy" : ""}`, title: why || null }, st,
+        // A queued lease says what it waits for (evicting X, waiting for N MB): the point of looking at the queue.
+        l.state === "queued" && l.reason ? el("span", { class: "svc-err", text: l.reason }) : null));
   }) : [el("tr", {}, el("td", { colSpan: 6, class: "none", text: "no leases" }))]));
 }
 

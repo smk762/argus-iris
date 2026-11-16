@@ -22,8 +22,8 @@ Not checked out? Read https://github.com/smk762/argus-cortex/blob/dev/SUITE.md
 
 ## Layout
 
-`src/argus_iris/` — the package. Rollout step 3, first half: leases are served and placed but granted without
-admission; nothing evicts yet.
+`src/argus_iris/` — the package. Rollout step 3: leases, placement and admission (`admission: observe` grants
+everything and records `fits`; `enforce` queues, spills and evicts). No idle-kill or keepalive yet (step 4).
 
 - `models.py` — agent snapshot (`NodeSnapshot`, `GpuProcess`, …) and the broker's read models (`NodeState`,
   `Resident`, `NodeLedger`). Lease and tenant-manifest models are **not** here: import them from
@@ -36,7 +36,8 @@ admission; nothing evicts yet.
   argus-http validates `/health` as cortex's `ResidentHealth` and reads older shapes best-effort, logging
   `resident_off_contract` (and `detail.off_contract` on the resident); a truthy non-bool `busy` counts as busy,
   `state.py` (`Broker` polls agents and adapters, ticks the lease book every second; `compose_node` is the pure
-  accounting), `leases.py` (`LeaseBook`: tenants, placement via `place()`, request_id idempotency, `resume`,
+  accounting), `leases.py` (`LeaseBook`: tenants, `candidates()` (placement order), admission (`_serve_queue`: class order
+  with aging, head reservation, spill, `_plan` eviction plans run by the broker's `_evict_for`), request_id idempotency, `resume`,
   heartbeat/TTL expiry, the 30 s first-beat reclaim, unpolled-queue drop; synchronous with an injectable clock, so test
   it by moving the clock and calling `tick()`), `actions.py` (warm: agent starts the container, wait for health, call `warm_path`;
   `evict_resident`: adapter route per source, 409 while busy, confirmed by the GPU's NVML free memory rising by half

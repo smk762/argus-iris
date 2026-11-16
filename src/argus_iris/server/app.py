@@ -122,10 +122,17 @@ class _BrokerCollector:
         )
         for (tenant, kind, how), n in self.broker.leases.ended.items():
             ended.add_metric([tenant, kind, how], n)
+        evictions = CounterMetricFamily(
+            "iris_admission_evictions",
+            "Residents admission evicted, by whether NVML confirmed it",
+            labels=["node", "outcome"],
+        )
+        for (node, outcome), n in self.broker.leases.evictions.items():
+            evictions.add_metric([node, outcome], n)
         tenants = GaugeMetricFamily("iris_tenants", "Tenants that registered a manifest")
         tenants.add_metric([], len(self.broker.leases.tenants))
         yield from (up, total, free, admissible, unattributed, ram, rvram, ridle, svc_up, queue)
-        yield from (leases, lease_mb, unfit, ended, tenants)
+        yield from (leases, lease_mb, unfit, ended, evictions, tenants)
 
 
 def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = None, poll: bool = True) -> FastAPI:
@@ -158,7 +165,7 @@ def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = No
         return {
             "status": "ok" if all(agents.values()) else "degraded",
             "version": argus_iris.__version__,
-            "mode": "observe-only",
+            "mode": "observe-only" if config.admission == "observe" else "admission",
             "polls": broker.polls,
             "leases": {"active": len(broker.leases.active()), "tenants": len(broker.leases.tenants)},
             "agents": agents,
