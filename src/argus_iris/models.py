@@ -94,6 +94,19 @@ class ResidentSource(StrEnum):
     PROCESS = "process"  # a GPU process no configured service claims
 
 
+class ResidentPolicy(BaseModel):
+    """What the operator's policy says about a resident now (rollout step 4), for the API and the dashboard."""
+
+    rule: int  # index of the first matching rule in the policy file
+    enforce: bool  # iris acts on it; otherwise it only reports
+    pinned: bool  # keepalive holds it now: never evicted, by idle-kill or admission
+    idle_s: float | None = None  # idle as the policy counts it: since its last lease, or the agent's view if shorter
+    idle_kill_s: float | None = None
+    due_in_s: float | None = None  # until idle-kill; 0 when due
+    next: str | None = None  # what iris does (or, not enforcing, would do) next: evict, restart, refresh keep_alive
+    note: str | None = None
+
+
 class Resident(BaseModel):
     """A model or process holding VRAM on a node, as iris sees it."""
 
@@ -107,6 +120,7 @@ class Resident(BaseModel):
     busy: bool = False  # the service reports work in flight (ComfyUI queue, ...)
     expires_at: datetime | None = None  # Ollama keep_alive expiry
     detail: dict = Field(default_factory=dict)
+    policy: ResidentPolicy | None = None  # set when a policy rule matches
 
 
 class ServiceState(BaseModel):

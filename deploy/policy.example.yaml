@@ -1,0 +1,42 @@
+# argus-iris residency policy (rollout step 4, #6). Point IRIS_POLICY at a copy (compose: IRIS_POLICY_FILE).
+# Report-only as shipped: no rule has `enforce: true`, so iris shows on the dashboard what it would do and does nothing.
+# Hand residents over one at a time: set the resident's own timer to -1 (table in #6) and `enforce: true` here, in the
+# same change, after iris has evicted it correctly at least once by hand (the dashboard's Evict).
+timezone: America/Los_Angeles      # cron fields only; everything else is UTC
+
+windows: []
+#  - name: nightly-audit
+#    cron: "0 1 * * *"
+#    duration: 5h
+#    tenant: ai-code-auditor
+#    target: "ollama:*"
+#    class: batch
+
+residents:                         # first matching rule wins; fnmatch patterns
+  # SingGuard stays loaded on dragon: keep_alive -1, never evicted (admission honours the pin even unenforced).
+  - match: { node: dragon, ollama: "hf.co/inclusionAI/SingGuard-4b-GGUF:*" }
+    keepalive: always
+  # agent-composer's sidecars (#6 table). Their own timers: *_KEEP_ALIVE_GPU / _CPU, INFINITY_IDLE_TIMEOUT.
+  - match: { resident: "dragon/xtts" }
+    idle_kill: 15m
+  - match: { resident: "dragon/tts" }
+    idle_kill: 15m
+  - match: { resident: "dragon/whisper" }
+    idle_kill: 15m
+  - match: { resident: "dragon/modernbert" }
+    idle_kill: 15m
+    restart_residual_mb: 64        # an unload leaves ~94 MB of CUDA context; only a restart returns it
+  - match: { resident: "dragon/infinity" }
+    idle_kill: 10m
+  # Ollama on dragon: with OLLAMA_KEEP_ALIVE=server, iris extends keep_alive until idle-kill.
+  - match: { node: dragon, ollama: "*" }
+    idle_kill: 15m
+  # jarrah: one model fills the card; keep it moving.
+  - match: { node: jarrah, ollama: "*" }
+    idle_kill: 5m
+  # voluptas on morpheus (Miso keeps ~2 GB reserved after unload: voluptas#26).
+  - match: { resident: "morpheus/miso" }
+    idle_kill: 15m
+    restart_residual_mb: 512
+  - match: { resident: "morpheus/comfyui" }
+    idle_kill: 30m                 # replaces COMFYUI_IDLE_TIMEOUT_SECONDS

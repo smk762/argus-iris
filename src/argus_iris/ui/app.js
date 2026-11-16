@@ -145,15 +145,27 @@ function renderResidents(node, state) {
     if (modelState && modelState !== "loaded") st = modelState;
     const left = r.expires_at ? -since(r.expires_at) : null;
     const exp = left == null ? "" : left > 365 * 86400 ? " · pinned" : ` · expires ${dur(left)}`;
+    const pol = policyText(r.policy);
     return el("tr", {},
       el("td", {}, el("span", { class: "sw", style: { "--c": colourVar(slot) }, "aria-hidden": "true" }), r.service),
       el("td", { text: r.model ?? "–" }),
       el("td", { class: "meta", text: r.source }),
       el("td", { class: "num", text: gb(r.vram_mb) }),
       el("td", { class: "num", "data-idle": idle ?? "", "data-at": Date.now(), text: dur(idle) }),
-      el("td", { class: `state ${r.busy ? "busy" : ""}`, text: st + exp }),
+      el("td", { class: `state ${r.busy ? "busy" : ""}`, title: r.policy?.note ?? null }, st + exp,
+        pol ? el("span", { class: `svc-err ${r.policy.enforce ? "" : "would"}`, text: pol }) : null),
       evictCell(r));
   }) : [el("tr", {}, el("td", { colSpan: 7, class: "none", text: "nothing resident" }))]));
+}
+
+// What the residency policy says: pinned, when idle-kill is due, what iris does next ("would" while not enforced).
+function policyText(p) {
+  if (!p) return null;
+  if (p.pinned) return p.enforce || !p.next ? "policy: pinned" : "policy: pinned (would set keep_alive -1)";
+  const verb = { evict: "idle-kill", restart: "restart", extend: "extend keep_alive", pin: "pin" }[p.next];
+  if (verb) return p.enforce ? `policy: ${verb} now` : `policy: would ${verb}`;
+  if (p.due_in_s != null) return `policy: idle-kill in ${dur(p.due_in_s)}${p.enforce ? "" : " (report-only)"}`;
+  return p.note ? `policy: ${p.note}` : null;
 }
 
 // Residents iris can evict: those read through an adapter, while they hold VRAM. Observed processes have none.

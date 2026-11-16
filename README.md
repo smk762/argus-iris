@@ -6,7 +6,9 @@ Status: rollout step 3 (leases and admission). Agents report per-process VRAM, i
 composes them with ComfyUI, Ollama and Argus service readings into residents and a per-node ledger, and serves the lease
 API that argus-cortex's `BrokerCoordinator` calls. With `admission: observe` (the default) it grants every lease at once
 and records whether it would have fit; with `admission: enforce` it queues what does not fit, spills to the next node,
-and evicts idle residents to make room. Idle-kill and keepalive (step 4) are next. See [DESIGN.md](DESIGN.md).
+and evicts idle residents to make room. A residency policy (`IRIS_POLICY`, see [deploy/policy.example.yaml](deploy/policy.example.yaml)) adds
+idle-kill, keepalive pins and restarts per resident (step 4); each rule only reports what it would do until it says
+`enforce: true`, so residents are handed over one at a time. See [DESIGN.md](DESIGN.md).
 
 ## Run
 

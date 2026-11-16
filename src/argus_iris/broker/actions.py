@@ -57,15 +57,20 @@ class WarmResult(BaseModel):
 
 
 async def _start_container(broker: Broker, svc: ServiceConfig) -> None:
+    await container_action(broker, svc, "start")
+
+
+async def container_action(broker: Broker, svc: ServiceConfig, action: Literal["start", "restart"]) -> None:
+    """Ask the node's agent to start or restart *svc*'s container (the agent's own allowlist still applies)."""
     node = broker.config.nodes[svc.node]
     token = os.environ.get(broker.config.agent_token_env, "")
     if not token:
         raise ActionError(
-            f"cannot start {svc.container}: {broker.config.agent_token_env} is not set on the broker", 503
+            f"cannot {action} {svc.container}: {broker.config.agent_token_env} is not set on the broker", 503
         )
     try:
         resp = await broker.client.post(
-            f"{node.agent_url}/containers/{svc.container}/start",
+            f"{node.agent_url}/containers/{svc.container}/{action}",
             headers={"Authorization": f"Bearer {token}"},
             timeout=httpx.Timeout(60.0),
         )
@@ -76,7 +81,7 @@ async def _start_container(broker: Broker, svc: ServiceConfig) -> None:
             detail = resp.json().get("detail")
         except ValueError:
             detail = resp.text[:200]
-        raise ActionError(f"agent on {svc.node} refused to start {svc.container}: HTTP {resp.status_code} {detail}")
+        raise ActionError(f"agent on {svc.node} refused to {action} {svc.container}: HTTP {resp.status_code} {detail}")
 
 
 def _reply(resp: httpx.Response, model: type[_M]) -> _M | None:
@@ -269,6 +274,10 @@ async def evict_resident(
     result.confirmed = _freed(baseline, state, resident)
     if now is not None and result.model_state is None:
         result.model_state = now.detail.get("model_state")
+    # The service took the call: what it holds now is its floor until it loads something again, confirmed or not.
+    # Without this, ComfyUI at a few hundred MB after /free (which frees nothing more) would be evicted every minute.
+    broker.residuals[resident.id] = result.after_mb
+    broker.residency.annotate(broker.nodes[resident.node])  # the policy view now knows it is evicted
     if result.confirmed:
         result.residual_mb = result.after_mb
         if result.residual_mb:
@@ -277,3 +286,19 @@ async def evict_resident(
         result.detail = f"memory not seen back after {confirm_s:g}s ({result.after_mb} of {result.before_mb} MB held)"
     log.info("resident_evicted", **result.model_dump())
     return result
+
+
+async def set_keep_alive(broker: Broker, resident: Resident, keep_alive: str | int) -> None:
+    """Set a loaded Ollama model's keep_alive (``-1`` pins it). Ollama resets the model's timer to this."""
+    svc = next(s for s in broker.config.services if s.id == resident.service)
+    try:
+        resp = await broker.client.post(
+            f"{svc.base_url}/api/generate",
+            json={"model": resident.model, "keep_alive": keep_alive},
+            headers=svc.headers(),
+            timeout=httpx.Timeout(60.0),
+        )
+    except httpx.HTTPError as exc:
+        raise ActionError(f"{svc.id} keep_alive for {resident.model} failed: {exc}") from exc
+    if resp.status_code >= 400:
+        raise ActionError(f"{svc.id} keep_alive for {resident.model}: HTTP {resp.status_code} {resp.text[:200]}")

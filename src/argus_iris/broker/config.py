@@ -93,6 +93,8 @@ class BrokerConfig(BaseModel):
     # Resident ids (fnmatch patterns) admission never evicts, e.g. "dragon/ollama-dragon/hf.co/inclusionAI/SingGuard-*".
     # The policy file of rollout step 4 adds windows; this is the always-pinned part.
     pinned: list[str] = Field(default_factory=list)
+    # How often the residency policy (IRIS_POLICY: idle-kill, keepalive, restart) is acted on.
+    residency_s: float = Field(15.0, gt=0)
 
     @model_validator(mode="after")
     def _check(self) -> BrokerConfig:

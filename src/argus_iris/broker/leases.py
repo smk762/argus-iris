@@ -63,6 +63,7 @@ from argus_cortex.gpu_wire import (
 from pydantic import BaseModel
 
 from argus_iris.broker.config import BrokerConfig
+from argus_iris.broker.policy import Policy
 from argus_iris.models import NodeState, Resident, ResidentSource, utcnow
 
 log = structlog.get_logger("argus_iris.leases")
@@ -100,6 +101,7 @@ class LeaseRecord(BaseModel):
     priority: PriorityClass
     preemptible: bool
     ttl_s: float
+    window: str | None = None  # the policy window that set its class, if one was open
     fits: bool | None = None  # would admission have granted it now? None: no ledger for the node
     admissible_mb: int | None = None  # what the node had to give, by the ledger, when it was granted
     resumed: bool = False
@@ -252,6 +254,8 @@ class LeaseBook:
         clock: Callable[[], datetime] = utcnow,
         on_change: Callable[[LeaseRecord], None] | None = None,
         evict: Callable[[str, list[str]], None] | None = None,
+        pinned: Callable[[Resident], bool] | None = None,
+        policy: Policy | None = None,
     ) -> None:
         self.config = config
         self._nodes = nodes
@@ -270,6 +274,10 @@ class LeaseBook:
         self._last_class: dict[tuple[str, str], str] = {}  # (node, model or service) -> class of its last lease
         self._last_grant: dict[tuple[str, str], datetime] = {}  # (node, model or service) -> its last grant
         self.evictions: Counter[tuple[str, str]] = Counter()  # (node, "confirmed" | "failed") -> count
+        self._pinned = pinned or (lambda r: False)  # the policy's keepalive pins (rollout step 4)
+        self.policy = policy or Policy()
+        self._last_used: dict[tuple[str, str], datetime] = {}  # (node, model or service) -> when its last lease ended
+        self._services: dict[str, str | None] = {}  # lease id -> the service it was granted on
 
     # --- tenants -------------------------------------------------------------------------------------------------
 
@@ -329,9 +337,16 @@ class LeaseBook:
             "last_poll": now,
             "wait_s": req.wait_s,
         }
+        constraints = _merge(kind.constraints if kind else GpuConstraints(), req.constraints)
+        # An open policy window sets the tenant's class (DESIGN.md, "windows"), whatever the caller asked for.
+        window = self.policy.window_class(
+            req.tenant, fields["target"], constraints.node or (manifest.node if manifest else None), now
+        )
+        if window:
+            fields["window"], fields["priority"] = window
         rec = LeaseRecord(**(fields | override))
         self.leases[lease_id] = rec
-        self._constraints[lease_id] = _merge(kind.constraints if kind else GpuConstraints(), req.constraints)
+        self._constraints[lease_id] = constraints
         return rec
 
     def _resume(self, req: LeaseRequest, now: datetime) -> LeaseRecord:
@@ -379,6 +394,7 @@ class LeaseBook:
         if where:
             key = (where.node, _model_key(target_model(rec.target)) or where.service or "")
             self._last_class[key], self._last_grant[key] = rec.priority, now
+            self._services[rec.lease_id] = where.service
         log.info(
             "lease_granted",
             lease=rec.lease_id,
@@ -527,6 +543,7 @@ class LeaseBook:
                 or (failed and (now - failed).total_seconds() < EVICT_RETRY_S)
                 or r.detail.get("model_state") in _FREED_STATES  # holds only a context: evicting frees nothing
                 or any(fnmatch.fnmatchcase(r.id, pat) for pat in self.config.pinned)
+                or self._pinned(r)
                 or (key is not None and (key == wanted or key in in_use_models))
                 or (key is None and r.service in in_use_services)
                 or theirs < mine  # a higher class than the request
@@ -632,6 +649,8 @@ class LeaseBook:
         self._serve_queue(now)
 
     def _end(self, rec: LeaseRecord, state: LeaseState, now: datetime, *, reason: str | None = None) -> None:
+        if rec.state == "granted" and rec.node:
+            self._last_used[(rec.node, self._use_key(rec))] = now
         rec.state, rec.ended_at, rec.expires_at = state, now, None
         if reason:
             rec.reason = reason
@@ -654,6 +673,7 @@ class LeaseBook:
 
     def _forget(self, rec: LeaseRecord) -> None:
         self.leases.pop(rec.lease_id, None)
+        self._services.pop(rec.lease_id, None)
         self._evicting.pop(rec.lease_id, None)
         self._constraints.pop(rec.lease_id, None)
         if rec.request_id:
@@ -679,6 +699,22 @@ class LeaseBook:
         return self.get(lease_id)
 
     # --- views ---------------------------------------------------------------------------------------------------
+
+    def _use_key(self, rec: LeaseRecord) -> str:
+        return _model_key(target_model(rec.target)) or self._services.get(rec.lease_id) or target_service(rec.target)
+
+    @staticmethod
+    def _resident_key(r: Resident) -> str:
+        return _model_key(r.model) or r.service
+
+    def in_use(self, r: Resident) -> bool:
+        """A granted lease is using *r* now (its model, or its service for a target with no model)."""
+        key = self._resident_key(r)
+        return any(o.state == "granted" and o.node == r.node and self._use_key(o) == key for o in self.leases.values())
+
+    def last_used(self, r: Resident) -> datetime | None:
+        """When the last lease on *r* ended, if any did since the broker started."""
+        return self._last_used.get((r.node, self._resident_key(r)))
 
     def active(self, node: str | None = None) -> list[LeaseRecord]:
         return [r for r in self.leases.values() if r.active and (node is None or r.node == node)]

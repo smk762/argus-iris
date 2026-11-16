@@ -12,16 +12,18 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, help="VRAM-aware G
 @app.command()
 def serve(
     config: Path = typer.Option(None, "--config", "-c", envvar="IRIS_CONFIG", help="Broker YAML config."),
+    policy: Path = typer.Option(None, "--policy", envvar="IRIS_POLICY", help="Residency policy YAML (optional)."),
     host: str = typer.Option("0.0.0.0", envvar="IRIS_HOST"),
     port: int = typer.Option(8120, envvar="IRIS_PORT"),
 ) -> None:
-    """Run the broker (observe-only in this release)."""
+    """Run the broker."""
     import uvicorn  # noqa: PLC0415
 
     from argus_iris.broker.config import load_config  # noqa: PLC0415
+    from argus_iris.broker.policy import load_policy  # noqa: PLC0415
     from argus_iris.server.app import create_app  # noqa: PLC0415
 
-    uvicorn.run(create_app(load_config(config)), host=host, port=port)
+    uvicorn.run(create_app(load_config(config), policy=load_policy(policy)), host=host, port=port)
 
 
 @app.command()
