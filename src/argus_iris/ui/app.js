@@ -162,7 +162,7 @@ function renderResidents(node, state) {
 function policyText(p) {
   if (!p) return null;
   if (p.pinned) return p.enforce || !p.next ? "policy: pinned" : "policy: pinned (would set keep_alive -1)";
-  const verb = { evict: "idle-kill", restart: "restart", extend: "extend keep_alive", pin: "pin" }[p.next];
+  const verb = { evict: "idle-kill", unload: "unload from CPU", restart: "restart", extend: "extend keep_alive", pin: "pin" }[p.next];
   if (verb) return p.enforce ? `policy: ${verb} now` : `policy: would ${verb}`;
   if (p.due_in_s != null) return `policy: idle-kill in ${dur(p.due_in_s)}${p.enforce ? "" : " (report-only)"}`;
   return p.note ? `policy: ${p.note}` : null;

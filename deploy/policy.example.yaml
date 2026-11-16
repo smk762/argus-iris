@@ -17,14 +17,19 @@ residents:                         # first matching rule wins; fnmatch patterns
   - match: { node: dragon, ollama: "hf.co/inclusionAI/SingGuard-4b-GGUF:*" }
     keepalive: always
   # agent-composer's sidecars (#6 table). Their own timers: *_KEEP_ALIVE_GPU / _CPU, INFINITY_IDLE_TIMEOUT.
+  # Hand over by setting only *_KEEP_ALIVE_GPU=-1. With it at -1 the sidecar never runs its CPU stage either,
+  # so iris owns that too: unload_after = the old *_KEEP_ALIVE_CPU.
   - match: { resident: "dragon/xtts" }
-    idle_kill: 15m
+    idle_kill: 120s                # GPU -> CPU, kept warm ...
+    unload_after: 600s             # ... then unloaded, freeing host RAM (was XTTS_KEEP_ALIVE_CPU)
   - match: { resident: "dragon/tts" }
-    idle_kill: 15m
+    idle_kill: 120s
+    unload_after: 600s
   - match: { resident: "dragon/whisper" }
-    idle_kill: 15m
+    idle_kill: 120s                # no CPU stage: unloaded at once
   - match: { resident: "dragon/modernbert" }
-    idle_kill: 15m
+    idle_kill: 300s
+    unload_after: 0s               # MODERNBERT_KEEP_ALIVE_CPU=0: straight from CPU to unloaded
     restart_residual_mb: 64        # an unload leaves ~94 MB of CUDA context; only a restart returns it
   - match: { resident: "dragon/infinity" }
     idle_kill: 10m

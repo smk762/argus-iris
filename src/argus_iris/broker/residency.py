@@ -12,6 +12,8 @@ are handed over one at a time (#6).
 - **Idle-kill** (``idle_kill``): once due, the resident is evicted through its adapter (to the CPU where the service
   can). Until then an Ollama model's ``keep_alive`` is extended before it runs out, so with ``OLLAMA_KEEP_ALIVE=server``
   iris, not Ollama's default, decides when it goes.
+- **Unload after** (``unload_after``): a resident idle-kill moved to the CPU is unloaded fully once idle this much
+  longer, freeing host RAM as well (the sidecars' own CPU timers stop running when their GPU timer is -1).
 - **Restart** (``restart_residual_mb``): a resident that is unloaded (not merely on the CPU, where a restart would
   throw away the warm copy) but still holds at least this much VRAM (a CUDA
   context, an allocator cache: modernbert's 94 MB, Miso's 2 GB) and is due is restarted through its node's agent,
@@ -81,7 +83,7 @@ class Residency:
         pinned = self.policy.kept(rule, now)
         idle = self._idle(r, now)
         due = None if rule.idle_kill is None or idle is None else max(0.0, rule.idle_kill - idle)
-        nxt, note = self._decide(r, rule, pinned, due, now)
+        nxt, note = self._decide(r, rule, pinned, due, idle, now)
         return ResidentPolicy(
             rule=index,
             enforce=rule.enforce,
@@ -94,7 +96,7 @@ class Residency:
         )
 
     def _decide(
-        self, r: Resident, rule: ResidentRule, pinned: bool, due: float | None, now: datetime
+        self, r: Resident, rule: ResidentRule, pinned: bool, due: float | None, idle: float | None, now: datetime
     ) -> tuple[str | None, str | None]:
         ollama = r.source == ResidentSource.OLLAMA
         left = (r.expires_at - now).total_seconds() if r.expires_at else None
@@ -114,6 +116,11 @@ class Residency:
         if state == "cpu":
             # Evicted to the CPU: warm in host RAM, and what it still holds on the GPU is the price of that. A
             # restart would throw the warm copy away, so only once the service has unloaded it fully.
+            if rule.unload_after is not None and rule.idle_kill is not None and idle is not None:
+                left_s = rule.idle_kill + rule.unload_after - idle
+                if left_s <= 0:
+                    return "unload", "on the CPU past unload_after: unload fully"
+                return None, f"on the CPU; unload in {int(left_s)}s"
             return None, f"on the CPU ({r.vram_mb} MB left)" if r.vram_mb else "on the CPU"
         if state in _FREED or self.evicted(r):
             svc = next((s for s in self.broker.config.services if s.id == r.service), None)
@@ -158,6 +165,10 @@ class Residency:
                 elif v.next == "evict":
                     result = await evict_resident(self.broker, r.id, reason="idle-kill")
                     outcome = "ok" if result.confirmed else "failed"
+                elif v.next == "unload":
+                    # Off the GPU already: this frees host RAM, which NVML cannot confirm. The service's word is it.
+                    result = await evict_resident(self.broker, r.id, mode="unload", reason="idle-kill: unload_after")
+                    outcome = "ok" if result.model_state == "unloaded" else "failed"
                 elif v.next == "restart":
                     svc = next(s for s in self.broker.config.services if s.id == r.service)
                     await container_action(self.broker, svc, "restart")

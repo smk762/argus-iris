@@ -41,7 +41,8 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
   heartbeat/TTL expiry, the 30 s first-beat reclaim, unpolled-queue drop; synchronous with an injectable clock, so test
   it by moving the clock and calling `tick()`), `policy.py` (the operator's YAML: cron, windows, resident rules; `IRIS_POLICY`), `residency.py` (`Residency`:
   per-resident `ResidentPolicy` view on every poll, `step()` acts on enforced rules: pin/extend Ollama keep_alive,
-  idle-kill evict, restart when unloaded but holding `restart_residual_mb`; `Broker.residuals` remembers what an
+  idle-kill evict, `unload_after` (CPU stage -> unloaded; confirmed by the reply, since only RAM moves), restart
+  when unloaded (never merely on the CPU) but holding `restart_residual_mb`; `Broker.residuals` remembers what an
   eviction left so it is not repeated), `actions.py` (warm: agent starts the container, wait for health, call `warm_path`;
   `evict_resident`: adapter route per source, 409 while busy, confirmed by the GPU's NVML free memory rising by half
   the resident's VRAM, not by the service's word; reports `residual_mb`).

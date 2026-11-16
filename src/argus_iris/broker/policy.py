@@ -18,6 +18,9 @@ residents:                           # first matching rule wins; ids/models/serv
   - match: { resident: "dragon/modernbert" }
     idle_kill: 15m
     restart_residual_mb: 64          # unloaded but holding a CUDA context this big: restart the container
+  - match: { resident: "dragon/xtts" }
+    idle_kill: 120s                  # GPU -> CPU (evict_path), kept warm in host RAM ...
+    unload_after: 600s               # ... then unloaded fully after 10 more minutes idle
 ```
 
 Each rule acts only with ``enforce: true``, so residents are handed over one at a time (#6): turn a resident's own
@@ -160,6 +163,10 @@ class ResidentRule(_Model):
     match: ResidentMatch = ResidentMatch()
     keepalive: Literal["always"] | KeepWindow | None = None
     idle_kill: Duration | None = None
+    # For a service with a CPU stage (evict_path): once idle-kill has moved it to the CPU, unload it fully after it
+    # has been idle this much longer, freeing host RAM too. 0 unloads at once. The sidecar's own *_KEEP_ALIVE_CPU
+    # timer does not run once its *_KEEP_ALIVE_GPU is -1, so iris has to own this stage too.
+    unload_after: Duration | None = None
     restart_residual_mb: int | None = Field(None, ge=0)
     enforce: bool = False
 
