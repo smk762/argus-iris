@@ -35,8 +35,13 @@ Not checked out? Read https://github.com/smk762/argus-cortex/blob/dev/SUITE.md
   `state.py` (`Broker` polls agents and adapters; `compose_node` is the pure accounting), `actions.py` (manual
   warm: agent starts the container, wait for health, call `warm_path`).
 - `server/app.py` — the broker API (`[server]` extra, `argus-iris serve`, :8120): `/nodes`, `/residents`, `/events`
-  (SSE), `/metrics`, `/health`, and `POST /services/{id}/warm` (needs `ARGUS_GPU_BROKER_TOKEN`). Wrapped in cortex's
+  (SSE), `/metrics`, `/health`, `/ui/`, and `POST /services/{id}/warm` (needs `ARGUS_GPU_BROKER_TOKEN`). Wrapped in cortex's
   `WriteGuard`.
+- `ui/` — the dashboard, served by the broker at `/ui/` (`/` redirects). Plain HTML and ES modules with no build
+  step, shipped in the wheel (the pattern argus-mask and argus-survey use). It is a thin client over `/health`,
+  `/config` and `/events`, and the warm POST, so it never computes what the broker decides. `vendor/dh/` holds
+  `dh-tokens.css` and `dh-theme.js`, copied unchanged from dh-shared 1.2.7 (via argus-mask): **never edit them**.
+  Re-copy them from a newer sync instead. Colours come from `--dh-*` tokens only.
 - `cli.py` — Typer app; entry point `argus-iris` (`serve`, `agent`, `version`).
 - `deploy/` — example broker config and compose files for the broker and the agents.
 

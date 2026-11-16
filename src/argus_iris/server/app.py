@@ -12,11 +12,13 @@ import hmac
 import json
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import structlog
 from argus_cortex.server import WriteGuard, cross_site_refuse
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from prometheus_client.core import GaugeMetricFamily
 
@@ -29,6 +31,7 @@ from argus_iris.models import NodeState, Resident
 log = structlog.get_logger("argus_iris.server")
 
 SSE_KEEPALIVE_S = 15.0
+UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
 
 class _BrokerCollector:
@@ -168,5 +171,15 @@ def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = No
     @app.get("/config")
     async def show_config() -> dict:
         return json.loads(config.model_dump_json())
+
+    # The dashboard: static files shipped in the package, a thin client over the routes above. Same origin, so its
+    # warm POST passes the WriteGuard without a trusted_origins entry; the bearer token is still required.
+    if UI_DIR.is_dir():
+
+        @app.get("/", include_in_schema=False)
+        async def root() -> RedirectResponse:
+            return RedirectResponse("/ui/")
+
+        app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
 
     return app
