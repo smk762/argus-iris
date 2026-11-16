@@ -8,6 +8,9 @@ evicted yet; the one action is a manual warm (below). See [DESIGN.md](DESIGN.md)
 
 ## Run
 
+For the compose files, copy [deploy/.env.example](deploy/.env.example) to `deploy/.env` and fill in the host's
+section. The broker needs `RAG_CHAT_API_KEY` to read agent-composer's residents on dragon.
+
 On each GPU host (see [deploy/agent.compose.yaml](deploy/agent.compose.yaml)):
 
 ```bash

@@ -1,5 +1,6 @@
 # argus-iris broker config (observe-only release). Point IRIS_CONFIG at a copy of this file.
-# Hostnames are examples; use whatever resolves on your LAN.
+# Hostnames are examples; use whatever resolves on your LAN. The broker container does not see the host's
+# /etc/hosts, so names that resolve only there will fail: use IPs (or DNS) in deploy/iris.yaml (gitignored).
 poll_s: 5
 agent_timeout_s: 3
 
