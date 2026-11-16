@@ -44,8 +44,18 @@ curl -X POST -H "Authorization: Bearer $ARGUS_GPU_BROKER_TOKEN" http://morpheus:
 
 It needs `ARGUS_GPU_BROKER_TOKEN` (callers) and `IRIS_AGENT_TOKEN` (matching the agents') set on the broker.
 
+The other manual action frees a resident's VRAM through its adapter: Ollama gets `keep_alive: 0` for that model,
+ComfyUI `POST /free`, an argus-http service its `evict_path` (GPU to CPU, kept warm) or else its `unload_path`. A busy
+resident is refused with 409; iris then waits until the agent sees the memory come back (`evict_confirm_s`, 30 s) and
+reports what the resident still holds (a CUDA context, say, which only a restart frees):
+
+```bash
+curl -X POST -H "Authorization: Bearer $ARGUS_GPU_BROKER_TOKEN" \
+  "http://morpheus:8120/residents/dragon/xtts/evict?mode=auto"   # mode: auto | evict | unload
+```
+
 The broker also serves a dashboard at `http://<broker>:8120/ui/` (`/` redirects there): VRAM per node split into
-residents, unattributed, held-back and admissible memory, plus residents with idle times, services with a warm button,
+residents, unattributed, held-back and admissible memory, plus residents with idle times, services with a warm button, residents with an evict button,
 and the node's leases (marked "over" where admission would have refused them).
 It updates live from `/events`. To warm from the page, enter `ARGUS_GPU_BROKER_TOKEN` under "Broker token". It is kept
 in that tab's session storage only.

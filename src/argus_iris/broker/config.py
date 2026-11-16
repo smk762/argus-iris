@@ -79,6 +79,8 @@ class BrokerConfig(BaseModel):
     agent_token_env: str = "IRIS_AGENT_TOKEN"
     # How long a warm waits for a started service to answer its health check.
     warm_timeout_s: float = Field(180.0, gt=0, le=900)
+    # How long an evict waits to see the memory come back on the agent's NVML view.
+    evict_confirm_s: float = Field(30.0, gt=0, le=300)
 
     @model_validator(mode="after")
     def _check(self) -> BrokerConfig:
