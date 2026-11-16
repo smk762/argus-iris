@@ -21,6 +21,13 @@ meets ``min_cc`` and ``bf16``.
   candidate is refused. The queue is served by class, with a wait bonus so nothing starves, and the head's
   reservation is kept: a lower lease is granted on that node only beside it.
 
+**Eviction plans** avoid thrash and evict as little as they can. A resident of the request's own class may be
+evicted (jarrah's "one model fills the card, keep it moving" needs it), but only once it has been idle, and loaded,
+for ``admission_same_class_idle_s`` (300 s; lower classes need only ``admission_min_idle_s``), so two tenants of one
+class cannot ping-pong a card. Lower classes go first, then the longest idle; victims the shortfall does not need are
+dropped; and across candidate nodes the cheapest plan wins (fewest same-class victims, then fewest MB evicted).
+Within a class the queue serves the tenant holding fewest grants first.
+
 :class:`LeaseBook` is synchronous and takes its clock, node view and an eviction callback as arguments, so it can be
 tested without a server; the broker runs the evictions and the HTTP layer adds long-polling.
 """
@@ -261,6 +268,7 @@ class LeaseBook:
         self._evicting: dict[str, set[str]] = {}  # lease id -> residents being evicted for it
         self._evict_failed: dict[str, datetime] = {}  # resident id -> when its eviction was last not confirmed
         self._last_class: dict[tuple[str, str], str] = {}  # (node, model or service) -> class of its last lease
+        self._last_grant: dict[tuple[str, str], datetime] = {}  # (node, model or service) -> its last grant
         self.evictions: Counter[tuple[str, str]] = Counter()  # (node, "confirmed" | "failed") -> count
 
     # --- tenants -------------------------------------------------------------------------------------------------
@@ -369,7 +377,8 @@ class LeaseBook:
         # beats every ttl/3 is never reclaimed early).
         rec.expires_at = now + timedelta(seconds=min(rec.ttl_s, max(FIRST_BEAT_S, rec.ttl_s / 2)))
         if where:
-            self._last_class[(where.node, _model_key(target_model(rec.target)) or where.service or "")] = rec.priority
+            key = (where.node, _model_key(target_model(rec.target)) or where.service or "")
+            self._last_class[key], self._last_grant[key] = rec.priority, now
         log.info(
             "lease_granted",
             lease=rec.lease_id,
@@ -388,9 +397,20 @@ class LeaseBook:
     # --- admission -----------------------------------------------------------------------------------------------
 
     def _queue(self, now: datetime) -> list[LeaseRecord]:
-        """Queued leases that may start now, in the order they are served: class, raised by time waited."""
+        """Queued leases that may start now, in the order they are served.
+
+        By class, raised one class per ``AGING_S`` waited so nothing starves; within a class, the tenant holding the
+        fewest grants first, so one busy tenant cannot hog it; then arrival.
+        """
+        holding = Counter(o.tenant for o in self.leases.values() if o.state == "granted")
         ready = [r for r in self.leases.values() if r.state == "queued" and (not r.not_before or r.not_before <= now)]
-        ready.sort(key=lambda r: (_rank(r.priority) - (now - r.created_at).total_seconds() / AGING_S, r.created_at))
+        ready.sort(
+            key=lambda r: (
+                _rank(r.priority) - int((now - r.created_at).total_seconds() // AGING_S),
+                holding[r.tenant],
+                r.created_at,
+            )
+        )
         return ready
 
     def _serve_queue(self, now: datetime) -> None:
@@ -427,23 +447,26 @@ class LeaseBook:
             )
             return
 
-        for c in cands:
+        plans = []  # (cost, candidate order, candidate, victims, short)
+        for i, c in enumerate(cands):
             state = nodes[c.node]
             _, admissible = _fit(c.node, state, rec, granted, reserved[c.node])
             short = _new_mb(rec, state) - (admissible or 0)
             victims = self._plan(rec, c, state, short, granted, now)
             if victims:
-                ids = [v.id for v in victims]
-                self._evicting[rec.lease_id] = set(ids)
-                rec.node = c.node
-                self._say(
-                    rec, f"evicting {', '.join(v.id.split('/', 1)[1] for v in victims)} on {c.node} for {short} MB"
-                )
-                reserved[c.node] += rec.vram_mb
-                log.info("admission_evicting", lease=rec.lease_id, node=c.node, short_mb=short, residents=ids)
-                if self._evict is not None:
-                    self._evict(rec.lease_id, ids)
-                return
+                same = sum(1 for v in victims if self._class_of(v) == rec.priority)
+                plans.append(((same, sum(v.vram_mb for v in victims)), i, c, victims, short))
+        if plans:
+            _, _, c, victims, short = min(plans, key=lambda p: (p[0], p[1]))
+            ids = [v.id for v in victims]
+            self._evicting[rec.lease_id] = set(ids)
+            rec.node = c.node
+            self._say(rec, f"evicting {', '.join(v.id.split('/', 1)[1] for v in victims)} on {c.node} for {short} MB")
+            reserved[c.node] += rec.vram_mb
+            log.info("admission_evicting", lease=rec.lease_id, node=c.node, short_mb=short, residents=ids)
+            if self._evict is not None:
+                self._evict(rec.lease_id, ids)
+            return
 
         first = cands[0]
         _, admissible = _fit(first.node, nodes.get(first.node), rec, granted, reserved[first.node])
@@ -459,6 +482,10 @@ class LeaseBook:
             rec.reason = reason
             self._changed(rec)
 
+    def _class_of(self, r: Resident) -> str:
+        """A resident takes the class of the last lease that used it; background if none has."""
+        return self._last_class.get((r.node, _model_key(r.model) or r.service), "background")
+
     def _plan(
         self,
         rec: LeaseRecord,
@@ -468,7 +495,13 @@ class LeaseBook:
         granted: list[LeaseRecord],
         now: datetime,
     ) -> list[Resident] | None:
-        """Residents on *where* whose eviction frees *short* MB, least recently used first; None if they can't."""
+        """The fewest residents on *where* whose eviction frees *short* MB, or None if no set can.
+
+        Eligible: idle long enough, not busy, pinned, under a live lease, being evicted, recently failed, already
+        unloaded, the model asked for, or of a higher class than the request. A same-class resident must also have
+        been idle, and loaded, for ``admission_same_class_idle_s``. Lower classes are taken first, then the longest
+        idle; then any victim the rest already cover is dropped.
+        """
         busy = set().union(*self._evicting.values()) if self._evicting else set()
         here = [o for o in granted if o.node == where.node]
         in_use_models = {_model_key(target_model(o.target)) for o in here} - {None}
@@ -479,11 +512,12 @@ class LeaseBook:
             if target_service(o.target) in (s.id, s.adapter)
         }
         wanted = _model_key(target_model(rec.target))
-        victims: list[Resident] = []
-        freed = 0
-        for r in sorted(state.residents, key=lambda r: -(r.idle_s or 0)):
+        mine = _rank(rec.priority)
+        eligible: list[Resident] = []
+        for r in state.residents:
             key = _model_key(r.model)
             failed = self._evict_failed.get(r.id)
+            theirs = _rank(self._class_of(r))
             if (
                 r.source == ResidentSource.PROCESS  # no adapter to evict it
                 or r.busy
@@ -495,16 +529,31 @@ class LeaseBook:
                 or any(fnmatch.fnmatchcase(r.id, pat) for pat in self.config.pinned)
                 or (key is not None and (key == wanted or key in in_use_models))
                 or (key is None and r.service in in_use_services)
-                # A resident takes the class of the last lease that used it (background if none did): it can be
-                # evicted for a request of the same class or a higher one, never a lower one.
-                or _rank(self._last_class.get((r.node, key or r.service), "background")) < _rank(rec.priority)
+                or theirs < mine  # a higher class than the request
             ):
                 continue
+            if theirs == mine:  # same class: only once it has settled, so two tenants cannot ping-pong the card
+                loaded = self._last_grant.get((r.node, key or r.service))
+                settle = self.config.admission_same_class_idle_s
+                if r.idle_s < settle or (loaded and (now - loaded).total_seconds() < settle):
+                    continue
+            eligible.append(r)
+
+        eligible.sort(key=lambda r: (-_rank(self._class_of(r)), -(r.idle_s or 0)))  # lowest class, then idlest
+        victims: list[Resident] = []
+        freed = 0
+        for r in eligible:
             victims.append(r)
             freed += r.vram_mb
             if freed >= short:
-                return victims
-        return None
+                break
+        else:
+            return None
+        for r in sorted(victims, key=lambda r: r.vram_mb):  # drop what the others already cover, smallest first
+            if freed - r.vram_mb >= short:
+                victims.remove(r)
+                freed -= r.vram_mb
+        return victims
 
     def evictions_done(self, lease_id: str, failed: list[str]) -> None:
         """The broker finished evicting for *lease_id*; *failed* were not confirmed. Serve the queue again."""

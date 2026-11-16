@@ -65,7 +65,8 @@ services:
 # queues what does not fit, spills to the next node (ollama-dragon, then ollama-jarrah), and evicts idle residents
 # (least recently used, never busy or pinned) to make room. Watch iris_leases_over_admissible in observe first.
 admission: observe
-admission_min_idle_s: 60
+admission_min_idle_s: 60          # before a lower-class resident is evicted
+admission_same_class_idle_s: 300  # idle and loaded this long before a same-class one is (no ping-pong)
 pinned:                       # resident ids (fnmatch) admission never evicts
   - "dragon/ollama-dragon/hf.co/inclusionAI/SingGuard-*"
 

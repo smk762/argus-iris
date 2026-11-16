@@ -87,6 +87,9 @@ class BrokerConfig(BaseModel):
     # A resident must have been idle this long before admission evicts it (so a model is not evicted between two
     # requests of one conversation).
     admission_min_idle_s: float = Field(60.0, ge=0)
+    # A resident of the request's own class is evicted only once it has been idle, and loaded, this long: so two
+    # tenants of one class cannot ping-pong a card between their models.
+    admission_same_class_idle_s: float = Field(300.0, ge=0)
     # Resident ids (fnmatch patterns) admission never evicts, e.g. "dragon/ollama-dragon/hf.co/inclusionAI/SingGuard-*".
     # The policy file of rollout step 4 adds windows; this is the always-pinned part.
     pinned: list[str] = Field(default_factory=list)
