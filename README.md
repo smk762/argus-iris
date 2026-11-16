@@ -15,6 +15,15 @@ idle-kill, keepalive pins and restarts per resident (step 4); each rule only rep
 For the compose files, copy [deploy/.env.example](deploy/.env.example) to `deploy/.env` and fill in the host's
 section. The broker needs `RAG_CHAT_API_KEY` to read agent-composer's residents on dragon.
 
+```bash
+docker compose up -d              # broker + this host's agent (morpheus)
+docker compose up -d iris-agent   # agent only (dragon, jarrah)
+docker compose build              # ghcr.io/smk762/argus-iris:${IRIS_TAG} from this checkout (set IRIS_TAG=local)
+```
+
+[compose.yaml](compose.yaml) includes [deploy/broker.compose.yaml](deploy/broker.compose.yaml) and
+[deploy/agent.compose.yaml](deploy/agent.compose.yaml) with `deploy/.env`; each also runs on its own with `-f`.
+
 On each GPU host (see [deploy/agent.compose.yaml](deploy/agent.compose.yaml)):
 
 ```bash

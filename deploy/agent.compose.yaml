@@ -2,6 +2,7 @@
 services:
   iris-agent:
     image: ghcr.io/smk762/argus-iris:${IRIS_TAG:-latest}
+    build: ..                     # `docker compose build`: the repo root (hatch-vcs needs its .git)
     container_name: iris-agent
     command: ["argus-iris", "agent"]
     restart: unless-stopped

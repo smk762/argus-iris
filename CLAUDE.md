@@ -57,7 +57,8 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
   `dh-tokens.css` and `dh-theme.js`, copied unchanged from dh-shared 1.2.7 (via argus-mask): **never edit them**.
   Re-copy them from a newer sync instead. Colours come from `--dh-*` tokens only.
 - `cli.py` — Typer app; entry point `argus-iris` (`serve`, `agent`, `version`).
-- `deploy/` — example broker config and compose files for the broker and the agents.
+- `compose.yaml` includes `deploy/broker.compose.yaml` and `deploy/agent.compose.yaml` with `deploy/.env` (project
+  `argus-iris`); `deploy/` — example broker config, policy, and the compose files for the broker and the agents.
 
 ## Commands
 

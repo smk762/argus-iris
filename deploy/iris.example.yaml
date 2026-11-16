@@ -46,6 +46,7 @@ services:
     base_url: http://morpheus:8034
     container: voluptas_miso
     warm_path: /admin/wake
+    token_env: ARGUS_ADMIN_TOKEN      # voluptas#35: miso's /admin/* honours it (admin_auth: true)
 
   # agent-composer (smk762/agent-composer#44): the sidecars listen on loopback, so iris reaches them through
   # rag-chat's resident gateway, which needs an API key as Bearer even for reads. Each sidecar's /health has a
