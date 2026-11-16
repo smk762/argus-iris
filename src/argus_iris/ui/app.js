@@ -1,5 +1,5 @@
-// iris dashboard: a thin client over the broker's own API. /events sends every node's state on connect and again on
-// each change, so the page needs no polling. The broker decides; this page only shows (and asks for a warm).
+// iris dashboard: a thin client over the broker's own API. /events sends every node's state and every active lease on
+// connect and again on each change, so the page needs no polling. The broker decides; this page only shows (and asks for a warm).
 
 const api = (path) => new URL(`../${path}`, location.href);
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -7,6 +7,7 @@ const TOKEN_KEY = "iris-broker-token";
 const SLOTS = 8; // dh categorical slots; a 9th service on a node folds into "other"
 
 const nodes = new Map(); // name -> NodeState (latest)
+const leases = new Map(); // lease_id -> LeaseRecord, queued or granted only
 const order = []; // node names in config order
 const colours = new Map(); // node -> Map(service -> slot), grows only: colour follows the service, never its rank
 let config = null;
@@ -216,6 +217,29 @@ function renderNode(state) {
   renderBar(node, state);
   renderResidents(node, state);
   renderServices(node, state);
+  renderLeases(state.name);
+}
+
+function renderLeases(name) {
+  const node = document.getElementById(`node-${name}`);
+  if (!node) return;
+  const rows = [...leases.values()].filter((l) => l.node === name)
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+  $("table.leases tbody", node).replaceChildren(...(rows.length ? rows.map((l) => {
+    const from = l.granted_at ?? l.created_at;
+    // fits=false: admission would have refused it. Observe-only grants it anyway; the row says so.
+    const over = l.fits === false;
+    const st = l.state === "queued" ? "queued" : over ? "granted · over" : "granted";
+    const why = [l.reason, l.caller && `caller ${l.caller}`, l.admissible_mb != null && `${gb(l.admissible_mb)} admissible at grant`]
+      .filter(Boolean).join(" · ");
+    return el("tr", {},
+      el("td", {}, `${l.tenant} · `, el("span", { class: "meta", text: l.kind })),
+      el("td", { text: l.target }),
+      el("td", { class: "meta", text: l.priority + (l.preemptible ? " · preemptible" : "") }),
+      el("td", { class: "num", text: l.vram_mb ? gb(l.vram_mb) : "–" }),
+      el("td", { class: "num", "data-idle": since(from) ?? "", "data-at": Date.now(), text: dur(since(from)) }),
+      el("td", { class: `state ${over ? "busy" : ""}`, title: why || null, text: st }));
+  }) : [el("tr", {}, el("td", { colSpan: 6, class: "none", text: "no leases" }))]));
 }
 
 function placeNode(node, name) {
@@ -331,7 +355,21 @@ async function boot() {
   const live = $("#live");
   const setLive = (state, text) => { live.dataset.state = state; live.lastElementChild.textContent = text; };
   const es = new EventSource(api("events"));
-  es.addEventListener("open", () => setLive("ok", "live"));
+  es.addEventListener("open", () => {
+    setLive("ok", "live");
+    // The stream resends every active lease on connect; drop what we had so leases that ended meanwhile go.
+    const had = new Set([...leases.values()].map((l) => l.node));
+    leases.clear();
+    for (const name of had) if (name) renderLeases(name);
+  });
+  es.addEventListener("lease", (e) => {
+    const l = JSON.parse(e.data);
+    const was = leases.get(l.lease_id);
+    if (l.state === "queued" || l.state === "granted") leases.set(l.lease_id, l);
+    else leases.delete(l.lease_id);
+    if (was?.node && was.node !== l.node) renderLeases(was.node);
+    if (l.node) renderLeases(l.node);
+  });
   es.addEventListener("error", () => setLive(es.readyState === EventSource.CLOSED ? "bad" : "warn", "reconnecting"));
   es.addEventListener("node", (e) => {
     const state = JSON.parse(e.data);

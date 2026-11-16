@@ -117,8 +117,10 @@ code { font-family: var(--dh-mono); font-size: .95em; }
 .legend .sw.free { background: var(--dh-surface-2); outline: 1px dashed var(--dh-border); outline-offset: -1px; }
 
 /* tables */
-.tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr)); gap: 1rem; }
+/* two columns at most (each at least half the row), one when narrower than 26rem */
+.tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, max(26rem, calc(50% - .5rem))), 1fr)); gap: 1rem; }
 .table-wrap { position: relative; overflow-x: auto; min-width: 0; }
+.table-wrap.wide { grid-column: 1 / -1; } /* leases: a row of their own, under residents and services */
 table { width: 100%; min-width: 30rem; border-collapse: collapse; font-size: var(--dh-text-xs); }
 th, td.num, td.state, td.meta { white-space: nowrap; }
 caption { text-align: start; font-weight: 600; font-size: var(--dh-text-xs); color: var(--dh-muted); padding-block-end: .3rem; }

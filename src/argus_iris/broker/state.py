@@ -1,6 +1,7 @@
 """The broker's view of every node: agent snapshots and adapter readings composed into residents and a ledger.
 
-Observe-only: nothing here admits, evicts or warms. :func:`compose_node` is pure so the accounting can be tested
+Observe-only: nothing here admits, evicts or warms. Leases are kept in :class:`~argus_iris.broker.leases.LeaseBook`,
+which the broker ticks every second and whose changes go out on the same subscriber queues as node changes. :func:`compose_node` is pure so the accounting can be tested
 without a network.
 """
 
@@ -15,6 +16,7 @@ import structlog
 
 from argus_iris.broker.adapters import ServiceReading, build_adapter
 from argus_iris.broker.config import BrokerConfig, NodeConfig, ServiceConfig
+from argus_iris.broker.leases import LeaseBook, LeaseRecord
 from argus_iris.models import (
     GpuProcess,
     NodeLedger,
@@ -27,6 +29,9 @@ from argus_iris.models import (
 )
 
 log = structlog.get_logger("argus_iris.broker")
+
+TICK_S = 1.0
+Event = tuple[str, NodeState | LeaseRecord]  # ("node", state) or ("lease", record), as the SSE stream names them
 
 
 def _min_idle(procs: list[GpuProcess]) -> float | None:
@@ -187,8 +192,11 @@ class Broker:
         }
         self._last_seen: dict[str, object] = {}
         self._fingerprints: dict[str, dict] = {}
-        self._subscribers: set[asyncio.Queue[NodeState]] = set()
+        self._subscribers: set[asyncio.Queue[Event]] = set()
         self.polls = 0
+        self.leases = LeaseBook(
+            config, lambda: self.nodes, on_change=lambda rec: self._publish(("lease", rec.model_copy()))
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -229,10 +237,13 @@ class Broker:
             fingerprint = _volatile_free(state)
             if self._fingerprints.get(name) != fingerprint:
                 self._fingerprints[name] = fingerprint
-                self._publish(state)
+                self._publish(("node", state))
         self.polls += 1
 
     async def run(self) -> None:
+        await asyncio.gather(self._poll_loop(), self._tick_loop())
+
+    async def _poll_loop(self) -> None:
         while True:
             try:
                 await self.poll_once()
@@ -240,14 +251,22 @@ class Broker:
                 log.exception("broker_poll_failed")
             await asyncio.sleep(self.config.poll_s)
 
-    def _publish(self, state: NodeState) -> None:
+    async def _tick_loop(self) -> None:
+        while True:
+            await asyncio.sleep(TICK_S)
+            try:
+                self.leases.tick()
+            except Exception:  # noqa: BLE001 - a bad tick must not stop expiry for good
+                log.exception("lease_tick_failed")
+
+    def _publish(self, event: Event) -> None:
         for queue in list(self._subscribers):
             with contextlib.suppress(asyncio.QueueFull):
-                queue.put_nowait(state)
+                queue.put_nowait(event)
 
     @contextlib.asynccontextmanager
-    async def subscribe(self) -> AsyncIterator[asyncio.Queue[NodeState]]:
-        queue: asyncio.Queue[NodeState] = asyncio.Queue(maxsize=100)
+    async def subscribe(self) -> AsyncIterator[asyncio.Queue[Event]]:
+        queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=100)
         self._subscribers.add(queue)
         try:
             yield queue
