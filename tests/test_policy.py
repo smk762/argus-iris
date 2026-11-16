@@ -226,3 +226,18 @@ async def test_a_free_that_frees_nothing_is_not_repeated():
     await broker.residency.step()
     assert broker.residency.actions[("morpheus", "evict", "failed")] == 1
     assert view(broker, "morpheus/comfyui").next is None  # remembered: not every minute from now on
+
+
+async def test_a_resident_on_the_cpu_is_never_restarted():
+    dragon, broker = await make(
+        [{"match": {"resident": "dragon/xtts"}, "idle_kill": "30s", "restart_residual_mb": 64, "enforce": True}]
+    )
+    await broker.residency.step()  # due: evicted to the CPU, leaving its context behind
+    assert dragon.calls == ["POST http://dragon:9150/r/xtts/admin/evict"]
+    dragon.vram["xtts"] = 564  # tts on dragon keeps this much after an evict to the CPU
+    await broker.poll_once()
+    v = view(broker, "dragon/xtts")
+    assert (v.next, v.note) == (None, "on the CPU (564 MB left)")  # warm in RAM: a restart would lose it
+    dragon.state["xtts"] = "unloaded"  # the sidecar's own CPU timer has unloaded it
+    await broker.poll_once()
+    assert view(broker, "dragon/xtts").next == "restart"
