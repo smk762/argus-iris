@@ -35,6 +35,11 @@ curl -X POST -H "Authorization: Bearer $ARGUS_GPU_BROKER_TOKEN" http://morpheus:
 
 It needs `ARGUS_GPU_BROKER_TOKEN` (callers) and `IRIS_AGENT_TOKEN` (matching the agents') set on the broker.
 
+The broker also serves a dashboard at `http://<broker>:8120/ui/` (`/` redirects there): VRAM per node split into
+residents, unattributed, held-back and admissible memory, plus residents with idle times, services and a warm button.
+It updates live from `/events`. To warm from the page, enter `ARGUS_GPU_BROKER_TOKEN` under "Broker token". It is kept
+in that tab's session storage only.
+
 Part of the [Argus suite](https://github.com/smk762?tab=repositories&q=argus).
 
 ## Install

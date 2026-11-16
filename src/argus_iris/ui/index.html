@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>iris · GPU broker</title>
+  <script src="vendor/dh/dh-theme.js"></script>
+  <link rel="stylesheet" href="vendor/dh/dh-tokens.css">
+  <link rel="stylesheet" href="app.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <div class="brand">
+      <h1>iris</h1>
+      <span class="chip" id="mode">observe-only</span>
+      <span class="meta" id="version"></span>
+    </div>
+    <div class="status">
+      <span class="pill" id="agents" data-state="unknown">agents …</span>
+      <span class="pill" id="live" data-state="connecting"><span class="dot" aria-hidden="true"></span><span>connecting</span></span>
+      <button type="button" class="btn ghost" id="token-btn">Broker token</button>
+      <button type="button" class="btn ghost" data-dh-theme-toggle aria-label="Dark theme">Theme</button>
+    </div>
+  </header>
+
+  <main id="nodes" aria-live="polite">
+    <p class="empty" id="placeholder">Waiting for the broker's first poll…</p>
+  </main>
+
+  <dialog id="token-dialog" aria-labelledby="token-title">
+    <form method="dialog" id="token-form">
+      <h2 id="token-title">Broker token</h2>
+      <p class="meta">Manual actions (warm) send <code>ARGUS_GPU_BROKER_TOKEN</code> as a bearer token. It is kept in this
+        tab's session storage only.</p>
+      <label for="token-input">Token</label>
+      <input id="token-input" type="password" autocomplete="off" spellcheck="false">
+      <div class="actions">
+        <button type="button" class="btn ghost" id="token-clear">Clear</button>
+        <button type="button" class="btn ghost" value="cancel" id="token-cancel">Cancel</button>
+        <button type="submit" class="btn" value="save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="tip" id="tip" role="tooltip" hidden></div>
+
+  <template id="node-tpl">
+    <section class="node">
+      <header class="node-head">
+        <h2 class="node-name"></h2>
+        <span class="gpu meta"></span>
+        <span class="pill reach"></span>
+        <span class="meta seen"></span>
+      </header>
+      <p class="node-error" hidden></p>
+      <div class="tiles"></div>
+      <div class="vram" hidden>
+        <div class="seg-bar" role="img"></div>
+        <ul class="legend"></ul>
+      </div>
+      <div class="tables">
+        <div class="table-wrap">
+          <table class="residents">
+            <caption>Residents</caption>
+            <thead><tr><th scope="col">Service</th><th scope="col">Model</th><th scope="col">Source</th>
+              <th scope="col" class="num">VRAM</th><th scope="col" class="num">Idle</th><th scope="col">State</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table class="services">
+            <caption>Services</caption>
+            <thead><tr><th scope="col">Service</th><th scope="col">Adapter</th><th scope="col">Status</th>
+              <th scope="col" class="num">Queue</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </template>
+</body>
+</html>
