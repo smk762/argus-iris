@@ -241,3 +241,24 @@ async def test_a_resident_on_the_cpu_is_never_restarted():
     dragon.state["xtts"] = "unloaded"  # the sidecar's own CPU timer has unloaded it
     await broker.poll_once()
     assert view(broker, "dragon/xtts").next == "restart"
+
+
+async def test_unload_after_frees_the_cpu_stage_too():
+    dragon, broker = await make(
+        [{"match": {"resident": "dragon/xtts"}, "idle_kill": "30s", "unload_after": "600s", "enforce": True}]
+    )
+    dragon.residual["xtts"] = 94  # the CUDA context xtts keeps on the CPU, as on dragon
+    await broker.residency.step()  # idle 60 s >= 30 s: GPU -> CPU
+    assert dragon.calls == ["POST http://dragon:9150/r/xtts/admin/evict"]
+    await broker.poll_once()
+    v = view(broker, "dragon/xtts")
+    assert (v.next, v.note) == (None, "on the CPU; unload in 570s")  # 30 + 600 - 60
+    broker.residency._cooldown.clear()
+    rule = broker.policy.residents[0]
+    broker.policy.residents[0] = rule.model_copy(update={"unload_after": 0.0})  # or once 600 s have passed
+    await broker.poll_once()
+    assert view(broker, "dragon/xtts").next == "unload"
+    await broker.residency.step()
+    assert dragon.calls[-1] == "POST http://dragon:9150/r/xtts/admin/unload"
+    assert dragon.state["xtts"] == "unloaded"
+    assert broker.residency.actions[("dragon", "unload", "ok")] == 1  # no VRAM moved, and that is not a failure
