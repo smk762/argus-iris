@@ -17,6 +17,8 @@ import structlog
 from argus_iris.broker.adapters import ServiceReading, build_adapter
 from argus_iris.broker.config import BrokerConfig, NodeConfig, ServiceConfig
 from argus_iris.broker.leases import LeaseBook, LeaseRecord
+from argus_iris.broker.policy import Policy
+from argus_iris.broker.residency import Residency
 from argus_iris.models import (
     GpuProcess,
     NodeLedger,
@@ -175,6 +177,8 @@ def _volatile_free(state: NodeState) -> dict:
     data = state.model_dump(mode="json", exclude={"last_seen"})
     for r in data["residents"]:
         r.pop("idle_s", None)
+        if r.get("policy"):
+            r["policy"] = {k: v for k, v in r["policy"].items() if k not in ("idle_s", "due_in_s")}
     if data.get("host"):
         data["host"].pop("available_mb", None)
     if data.get("gpu"):
@@ -183,8 +187,15 @@ def _volatile_free(state: NodeState) -> dict:
 
 
 class Broker:
-    def __init__(self, config: BrokerConfig, *, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self, config: BrokerConfig, *, client: httpx.AsyncClient | None = None, policy: Policy | None = None
+    ) -> None:
         self.config = config
+        self.policy = policy or Policy()
+        # What a confirmed eviction left each resident holding. Until it grows past that (a model loaded again) the
+        # resident counts as evicted: ComfyUI keeps a few hundred MB after /free and says nothing about its models.
+        self.residuals: dict[str, int] = {}
+        self.residency = Residency(self, self.policy)
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(config.agent_timeout_s))
         self._adapters = {s.id: build_adapter(s) for s in config.services}
         self.nodes: dict[str, NodeState] = {
@@ -199,6 +210,8 @@ class Broker:
             lambda: self.nodes,
             on_change=lambda rec: self._publish(("lease", rec.model_copy())),
             evict=self._start_eviction,
+            pinned=self.residency.protected,
+            policy=self.policy,
         )
         self._tasks: set[asyncio.Task] = set()
 
@@ -231,6 +244,7 @@ class Broker:
         )
 
     def _apply(self, name: str, state: NodeState) -> None:
+        self.residency.annotate(state)
         was = self.nodes.get(name)
         if was and was.reachable != state.reachable:
             log.info("agent_reachability", node=name, reachable=state.reachable, error=state.error)
@@ -254,7 +268,7 @@ class Broker:
         return state
 
     async def run(self) -> None:
-        await asyncio.gather(self._poll_loop(), self._tick_loop())
+        await asyncio.gather(self._poll_loop(), self._tick_loop(), self._residency_loop())
 
     async def _poll_loop(self) -> None:
         while True:
@@ -263,6 +277,14 @@ class Broker:
             except Exception:  # noqa: BLE001 - keep polling; the failure is logged
                 log.exception("broker_poll_failed")
             await asyncio.sleep(self.config.poll_s)
+
+    async def _residency_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.config.residency_s)
+            try:
+                await self.residency.step()
+            except Exception:  # noqa: BLE001 - a failed step must not stop residency for good
+                log.exception("residency_step_failed")
 
     async def _tick_loop(self) -> None:
         while True:

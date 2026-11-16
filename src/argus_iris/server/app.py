@@ -37,6 +37,7 @@ import argus_iris
 from argus_iris.broker.actions import ActionError, EvictMode, EvictResult, WarmResult, evict_resident, warm_service
 from argus_iris.broker.config import BrokerConfig, load_config
 from argus_iris.broker.leases import LeaseRecord
+from argus_iris.broker.policy import Policy, load_policy
 from argus_iris.broker.state import Broker
 from argus_iris.models import NodeState, Resident
 
@@ -129,15 +130,24 @@ class _BrokerCollector:
         )
         for (node, outcome), n in self.broker.leases.evictions.items():
             evictions.add_metric([node, outcome], n)
+        residency = CounterMetricFamily(
+            "iris_residency_actions",
+            "Policy actions taken: pin, extend, evict, restart",
+            labels=["node", "action", "outcome"],
+        )
+        for (node, action, outcome), n in self.broker.residency.actions.items():
+            residency.add_metric([node, action, outcome], n)
         tenants = GaugeMetricFamily("iris_tenants", "Tenants that registered a manifest")
         tenants.add_metric([], len(self.broker.leases.tenants))
         yield from (up, total, free, admissible, unattributed, ram, rvram, ridle, svc_up, queue)
-        yield from (leases, lease_mb, unfit, ended, evictions, tenants)
+        yield from (leases, lease_mb, unfit, ended, evictions, residency, tenants)
 
 
-def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = None, poll: bool = True) -> FastAPI:
+def create_app(
+    config: BrokerConfig | None = None, *, broker: Broker | None = None, poll: bool = True, policy: Policy | None = None
+) -> FastAPI:
     if broker is None:
-        broker = Broker(config or load_config())
+        broker = Broker(config or load_config(), policy=policy if policy is not None else load_policy())
     config = broker.config
     registry = CollectorRegistry(auto_describe=False)
     registry.register(_BrokerCollector(broker))
@@ -300,6 +310,10 @@ def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = No
         if rec is None:
             raise HTTPException(404, f"no lease {lease_id!r}")
         return status_of(rec)
+
+    @app.get("/policy")
+    async def show_policy() -> dict:
+        return json.loads(broker.policy.model_dump_json(by_alias=True))
 
     @app.get("/config")
     async def show_config() -> dict:

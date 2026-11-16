@@ -65,6 +65,7 @@ class World:
         self.vram = {"ollama": 4000, "xtts": 2400, "whisper": 1500, "voluptas_comfyui": 6000, "frigate": 150}
         self.state = {"xtts": "gpu", "whisper": "gpu"}
         self.ollama_models = [SINGGUARD]
+        self.expires: dict[str, str] = {}  # model -> RFC 3339 expiry, as /api/ps reports it
         self.comfy_queue = 0
         self.busy: dict[str, int] = {}
         self.busy_on_post: dict[str, int] = {}  # work that arrives between iris's health read and its POST
@@ -92,14 +93,24 @@ class World:
         url, method = str(request.url), request.method
         if method == "POST":
             self.calls.append(f"POST {url} {request.content.decode() or ''}".strip())
+        if ":9110/containers/" in url and method == "POST":  # the agent: start or restart a container
+            name, action = url.split("/")[-2:]
+            if action == "restart" and name in self.vram:
+                self.vram[name] = 0  # the CUDA context goes with the process
+            return httpx.Response(200, json={"container": name, "action": action, "ok": True})
         if url.endswith(":9110/snapshot"):
             return httpx.Response(200, json=self._snap("dragon" if "dragon" in url else "morpheus"))
         if url == "http://dragon:11434/api/ps":
-            models = [{"name": m, "size": 4000 * MIB, "size_vram": 4000 * MIB} for m in self.ollama_models]
+            models = [
+                {"name": m, "size": 4000 * MIB, "size_vram": 4000 * MIB, "expires_at": self.expires.get(m)}
+                for m in self.ollama_models
+            ]
             return httpx.Response(200, json={"models": models})
         if url == "http://dragon:11434/api/generate":
             body = json.loads(request.content)
-            assert body["keep_alive"] == 0
+            if body["keep_alive"] != 0:  # -1 pins; "900s" extends
+                self.expires[body["model"]] = "2318-01-01T00:00:00Z" if body["keep_alive"] == -1 else "extended"
+                return httpx.Response(200, json={"done": True})
             self.ollama_models.remove(body["model"])
             self.vram["ollama"] = 300 if self.frees_memory else self.vram["ollama"]
             return httpx.Response(200, json={"done": True, "done_reason": "unload"})

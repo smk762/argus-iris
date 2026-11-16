@@ -23,7 +23,7 @@ Not checked out? Read https://github.com/smk762/argus-cortex/blob/dev/SUITE.md
 ## Layout
 
 `src/argus_iris/` — the package. Rollout step 3: leases, placement and admission (`admission: observe` grants
-everything and records `fits`; `enforce` queues, spills and evicts). No idle-kill or keepalive yet (step 4).
+everything and records `fits`; `enforce` queues, spills and evicts). Step 4's residency policy (`policy.py`, `residency.py`) is report-only per rule until `enforce: true`.
 
 - `models.py` — agent snapshot (`NodeSnapshot`, `GpuProcess`, …) and the broker's read models (`NodeState`,
   `Resident`, `NodeLedger`). Lease and tenant-manifest models are **not** here: import them from
@@ -39,7 +39,10 @@ everything and records `fits`; `enforce` queues, spills and evicts). No idle-kil
   accounting), `leases.py` (`LeaseBook`: tenants, `candidates()` (placement order), admission (`_serve_queue`: class order
   with aging, head reservation, spill, `_plan` eviction plans run by the broker's `_evict_for`), request_id idempotency, `resume`,
   heartbeat/TTL expiry, the 30 s first-beat reclaim, unpolled-queue drop; synchronous with an injectable clock, so test
-  it by moving the clock and calling `tick()`), `actions.py` (warm: agent starts the container, wait for health, call `warm_path`;
+  it by moving the clock and calling `tick()`), `policy.py` (the operator's YAML: cron, windows, resident rules; `IRIS_POLICY`), `residency.py` (`Residency`:
+  per-resident `ResidentPolicy` view on every poll, `step()` acts on enforced rules: pin/extend Ollama keep_alive,
+  idle-kill evict, restart when unloaded but holding `restart_residual_mb`; `Broker.residuals` remembers what an
+  eviction left so it is not repeated), `actions.py` (warm: agent starts the container, wait for health, call `warm_path`;
   `evict_resident`: adapter route per source, 409 while busy, confirmed by the GPU's NVML free memory rising by half
   the resident's VRAM, not by the service's word; reports `residual_mb`).
 - `server/app.py` — the broker API (`[server]` extra, `argus-iris serve`, :8120): `/nodes`, `/residents`, `/events`
