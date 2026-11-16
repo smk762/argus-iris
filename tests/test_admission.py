@@ -115,18 +115,16 @@ def test_evicts_idle_residents_least_recently_used_first_then_grants():
     w.nodes["jarrah"] = node("jarrah", 0)
     rec = w.ask(target="ollama:qwen3:8b", vram_mb=4000)
     assert rec.state == "queued" and rec.node == "dragon"
-    # 3000 short: the two idlest (1200 s, 900 s) free 3500; xtts (300 s) is spared.
-    assert w.evicted == [
-        (rec.lease_id, ["dragon/ollama-dragon/nomic-embed-text:latest", "dragon/ollama-dragon/old:7b"])
-    ]
-    assert rec.reason.startswith("evicting ollama-dragon/nomic-embed-text:latest, ollama-dragon/old:7b on dragon")
+    # 3000 short: the two idlest (1200 s, 900 s) cover it; old:7b alone does, so nomic-embed-text is spared too.
+    assert w.evicted == [(rec.lease_id, ["dragon/ollama-dragon/old:7b"])]
+    assert rec.reason == "evicting ollama-dragon/old:7b on dragon for 3000 MB"
     w.book.tick()
     assert len(w.evicted) == 1  # not planned twice while it runs
 
     w.nodes["dragon"] = node("dragon", 4500, [res("dragon", "xtts", 2400, idle=300)])
     w.book.evictions_done(rec.lease_id, failed=[])
     assert (rec.state, rec.node) == ("granted", "dragon")
-    assert w.book.evictions[("dragon", "confirmed")] == 2
+    assert w.book.evictions[("dragon", "confirmed")] == 1
 
 
 @pytest.mark.parametrize(
@@ -166,6 +164,7 @@ def test_a_resident_of_a_higher_class_is_not_evicted_for_a_lower_request():
     w.nodes["dragon"] = node("dragon", 0, [res("dragon", "ollama-dragon", 6000, model="a2f:latest")])
     batch = w.ask(target="ollama:other", vram_mb=4000, priority="batch")
     assert batch.state == "queued" and w.evicted == []
+    w.now += timedelta(seconds=301)  # same class: only once it has settled
     realtime = w.ask(target="ollama:other2", vram_mb=4000, priority="realtime")
     assert w.evicted == [(realtime.lease_id, ["dragon/ollama-dragon/a2f:latest"])]
 
@@ -249,3 +248,80 @@ async def test_broker_evicts_and_then_grants():
     assert (got.state, got.node) == ("granted", "dragon")
     assert dragon.calls == ["POST http://dragon:9150/r/xtts/admin/evict"]
     await asyncio.sleep(0)
+
+
+# --- thrash, efficiency, fairness --------------------------------------------------------------------------------
+
+
+def lease_on(w: World, model: str, priority: str) -> None:
+    """A lease of *priority* used *model* on dragon (so the resident takes that class), and ended."""
+    rec = w.ask(target=f"ollama:{model}", vram_mb=1, priority=priority, constraints=GpuConstraints(node="dragon"))
+    w.book.release(rec.lease_id, LeaseRelease())
+
+
+def test_same_class_residents_are_evicted_only_once_settled():
+    w = World()
+    w.nodes["dragon"] = node("dragon", 9999)
+    lease_on(w, "chat:a", "interactive")
+    w.nodes = {
+        "dragon": node("dragon", 0, [res("dragon", "ollama-dragon", 6000, model="chat:a", idle=120)]),
+        "jarrah": node("jarrah", 0),
+    }
+    rec = w.ask(target="ollama:chat:b", vram_mb=4000, priority="interactive")
+    assert rec.state == "queued" and w.evicted == []  # idle 120 s < 300 s: it might be used again in a moment
+    w.nodes["dragon"] = node("dragon", 0, [res("dragon", "ollama-dragon", 6000, model="chat:a", idle=400)])
+    w.book.tick()
+    assert w.evicted == []  # idle long enough, but loaded (granted) under 300 s ago
+    w.now += timedelta(seconds=301)
+    w.book.get(rec.lease_id)
+    w.book.tick()
+    assert w.evicted == [(rec.lease_id, ["dragon/ollama-dragon/chat:a"])]
+
+
+def test_lower_classes_go_before_the_idler_same_class_resident():
+    w = World()
+    w.nodes["dragon"] = node("dragon", 9999)
+    lease_on(w, "chat:a", "interactive")
+    lease_on(w, "bulk:b", "batch")
+    w.now += timedelta(seconds=301)
+    w.nodes = {
+        "dragon": node(
+            "dragon",
+            0,
+            [
+                res("dragon", "ollama-dragon", 5000, model="chat:a", idle=3000),
+                res("dragon", "ollama-dragon", 5000, model="bulk:b", idle=400),
+            ],
+        ),
+        "jarrah": node("jarrah", 0),
+    }
+    rec = w.ask(target="ollama:new", vram_mb=4000, priority="interactive")
+    assert w.evicted == [(rec.lease_id, ["dragon/ollama-dragon/bulk:b"])]
+
+
+def test_the_cheapest_plan_across_nodes_wins():
+    w = World()
+    w.nodes = {
+        "dragon": node(
+            "dragon",
+            0,
+            [res("dragon", "ollama-dragon", 3000, model="x:1"), res("dragon", "ollama-dragon", 3000, model="x:2")],
+        ),
+        "jarrah": node("jarrah", 0, [res("jarrah", "ollama-jarrah", 4500, model="y:1")]),
+    }
+    rec = w.ask(target="ollama:new", vram_mb=4000)
+    # dragon needs both (6000 MB evicted), jarrah one (4500 MB): jarrah, though dragon comes first in config.
+    assert w.evicted == [(rec.lease_id, ["jarrah/ollama-jarrah/y:1"])] and rec.node == "jarrah"
+
+
+def test_within_a_class_the_tenant_holding_fewest_grants_goes_first():
+    w = World()
+    w.nodes = {"dragon": node("dragon", 2000), "jarrah": node("jarrah", 0)}
+    hog = [w.ask(tenant="hog", target="ollama:h", vram_mb=1000) for _ in range(2)]
+    assert [h.state for h in hog] == ["granted", "granted"]
+    first = w.ask(tenant="hog", target="ollama:h", vram_mb=1000)
+    w.now += timedelta(seconds=1)
+    other = w.ask(tenant="quiet", target="ollama:q", vram_mb=1000)
+    assert [w.book.position(r) for r in (other, first)] == [0, 1]  # later, but holding nothing
+    w.book.release(hog[0].lease_id, LeaseRelease())
+    assert (other.state, first.state) == ("granted", "queued")
