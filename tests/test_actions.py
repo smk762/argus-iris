@@ -37,9 +37,12 @@ CONFIG = {
 class World:
     """ComfyUI and diffusers that are down until the agent starts their container."""
 
-    def __init__(self, *, comfy_up: bool = False, comes_back: bool = True) -> None:
+    def __init__(
+        self, *, comfy_up: bool = False, comes_back: bool = True, wake: tuple[int, dict] | None = None
+    ) -> None:
         self.up = {"voluptas_comfyui": comfy_up, "voluptas_image_gen_diffusers": False}
         self.comes_back = comes_back
+        self.wake = wake or (200, {"status": "ready", "model_state": "gpu", "unloaded": None})
         self.calls: list[str] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -60,7 +63,7 @@ class World:
             if not self.up["voluptas_image_gen_diffusers"]:
                 raise httpx.ConnectError("refused")
             if method == "POST" and url.endswith("/admin/wake"):
-                return httpx.Response(200, json={"status": "ready", "model_state": "gpu"})
+                return httpx.Response(self.wake[0], json=self.wake[1])
             return httpx.Response(200, json={"model_state": "unloaded"})
         raise httpx.ConnectError("refused")
 
@@ -138,3 +141,18 @@ def test_warm_route_auth(monkeypatch) -> None:
             "/services/comfyui/warm", headers={"Authorization": "Bearer caller-tok", "Origin": "https://evil.example"}
         )
         assert r.status_code == 403
+
+
+async def test_warm_reads_the_wake_reply() -> None:
+    result = await warm_service(broker_for(World()), "diffusers", poll_s=0)
+    assert result.warmed and result.model_state == "gpu"
+    # A reply off the contract still counts as warmed; the state is just unknown.
+    result = await warm_service(broker_for(World(wake=(200, {"status": "ok"}))), "diffusers", poll_s=0)
+    assert result.warmed and result.model_state is None
+
+
+async def test_warm_while_busy_is_a_409_that_did_nothing() -> None:
+    world = World(wake=(409, {"status": "busy", "active": 2}))
+    with pytest.raises(ActionError, match=r"busy \(2 running\)") as exc:
+        await warm_service(broker_for(world), "diffusers", poll_s=0)
+    assert exc.value.status == 409

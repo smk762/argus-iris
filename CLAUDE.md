@@ -32,6 +32,8 @@ Not checked out? Read https://github.com/smk762/argus-cortex/blob/dev/SUITE.md
   memory, `docker.py` is a minimal Engine API client over the Unix socket, `app.py` serves `/snapshot`, `/metrics`,
   `/health` and token- and allowlist-gated `POST /containers/{name}/{start|stop|restart}`.
 - `broker/` — `config.py` (YAML, `IRIS_CONFIG`), `adapters/` (comfyui, ollama, argus-http; read-only),
+  argus-http validates `/health` as cortex's `ResidentHealth` and reads older shapes best-effort, logging
+  `resident_off_contract` (and `detail.off_contract` on the resident); a truthy non-bool `busy` counts as busy,
   `state.py` (`Broker` polls agents and adapters; `compose_node` is the pure accounting), `actions.py` (manual
   warm: agent starts the container, wait for health, call `warm_path`).
 - `server/app.py` — the broker API (`[server]` extra, `argus-iris serve`, :8120): `/nodes`, `/residents`, `/events`

@@ -198,20 +198,58 @@ def test_example_config_loads() -> None:
     load_config(Path(__file__).parent.parent / "deploy" / "iris.example.yaml")
 
 
-def test_parse_health_reads_both_shapes() -> None:
+def test_parse_health_reads_the_resident_contract() -> None:
     from argus_iris.broker.adapters.http import parse_health
 
-    # voluptas image-gen-diffusers / argus-lens: top level
-    r = parse_health({"status": "ok", "model_state": "gpu", "busy": True, "idle_s": 3.5, "gpu": {"total_mb": 24576}})
-    assert (r.busy, r.idle_s, r.detail["model_state"]) == (True, 3.5, "gpu")
-    # agent-composer sidecar (directly or via rag-chat's gateway): a gpu block
+    # ResidentHealth (argus-cortex 0.7): voluptas image-gen-diffusers, agent-composer's sidecars, extras kept
+    r = parse_health(
+        {"status": "ok", "model_state": "gpu", "busy": False, "idle_s": 3.5, "gpu": {"total_mb": 24576, "loaded": True}}
+    )
+    assert (r.busy, r.idle_s, r.detail) == (False, 3.5, {"model_state": "gpu", "status": "ok"})
+    r = parse_health({"model_state": "gpu", "busy": True, "idle_s": None})
+    assert (r.busy, r.idle_s) == (True, None) and "off_contract" not in r.detail
+
+
+def test_parse_health_reads_shapes_off_the_contract() -> None:
+    from argus_iris.broker.adapters.http import parse_health
+
+    # voluptas Miso (smk762/voluptas#26): busy is an object while working, null when idle. Busy must not read as idle.
+    miso = {"status": "ok", "model_state": "gpu", "idle_s": None, "gpu": {"allocated_mb": 8.1, "reserved_mb": 2004.0}}
+    r = parse_health({**miso, "busy": {"request_id": "r1", "endpoint": "stream", "busy_s": 3.2}})
+    assert (r.busy, r.idle_s, r.detail["model_state"]) == (True, None, "gpu")
+    assert "busy" in r.detail["off_contract"]
+    r = parse_health({**miso, "busy": None, "idle_s": 40})
+    assert (r.busy, r.idle_s) == (False, 40.0)
+    # argus-lens: the state in a gpu block
     r = parse_health(
         {"status": "ok", "gpu": {"loaded": True, "model_state": "cpu", "idle_s": 120, "free_vram_mb": None}}
     )
-    assert (r.busy, r.idle_s, r.detail) == (False, 120.0, {"loaded": True, "model_state": "cpu", "status": "ok"})
-    # unloaded: no idle figure
+    assert (r.busy, r.idle_s) == (False, 120.0)
+    assert {k: r.detail[k] for k in ("loaded", "model_state", "status")} == {
+        "loaded": True,
+        "model_state": "cpu",
+        "status": "ok",
+    }
     assert parse_health({"gpu": {"loaded": False, "idle_s": None}}).idle_s is None
-    assert parse_health("plain text").up
+    r = parse_health("plain text")
+    assert r.up and r.detail["off_contract"]
+
+
+async def test_off_contract_is_logged_once_per_change(monkeypatch) -> None:
+    from argus_iris.broker.adapters import http as http_adapter
+    from argus_iris.broker.config import ServiceConfig
+
+    bodies = iter([{"busy": None}, {"busy": None}, {"model_state": "unloaded", "busy": False}])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=next(bodies))))
+    logged: list[str] = []
+    monkeypatch.setattr(http_adapter.log, "warning", lambda event, **kw: logged.append(event))
+    monkeypatch.setattr(http_adapter.log, "info", lambda event, **kw: logged.append(event))
+    adapter = http_adapter.ArgusHttpAdapter(
+        ServiceConfig(id="miso", node="morpheus", adapter="argus-http", base_url="http://morpheus:8034")
+    )
+    for _ in range(3):
+        await adapter.read(client)
+    assert logged == ["resident_off_contract", "resident_on_contract"]
 
 
 async def test_service_idle_and_token(monkeypatch) -> None:
