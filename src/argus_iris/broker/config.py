@@ -50,6 +50,9 @@ class ServiceConfig(BaseModel):
     unload_path: RoutePath | None = "/admin/unload"
     evict_path: RoutePath | None = None
     warm_path: RoutePath | None = None
+    # VRAM the service takes once warm. A manual warm is refused while the node cannot admit it; unset, iris uses the
+    # most it has seen the service hold since the broker started.
+    warm_mb: int | None = Field(default=None, ge=0)
     # Name of an environment variable holding a bearer token sent on every request to this service (rag-chat's
     # resident gateway needs one even for reads; ARGUS_ADMIN_TOKEN guards /admin/*). Never the token itself.
     token_env: str | None = None

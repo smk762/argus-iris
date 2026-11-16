@@ -156,3 +156,63 @@ async def test_warm_while_busy_is_a_409_that_did_nothing() -> None:
     with pytest.raises(ActionError, match=r"busy \(2 running\)") as exc:
         await warm_service(broker_for(world), "diffusers", poll_s=0)
     assert exc.value.status == 409
+
+
+# --- warm refuses a node without room ---------------------------------------------------------------------------
+
+
+def _full_node(broker: Broker, *, admissible_mb: int, held: dict[str, int]) -> None:
+    from argus_iris.models import NodeLedger, NodeState, Resident, ResidentSource
+
+    state = NodeState(
+        name="morpheus",
+        agent_url="http://morpheus:9110",
+        reachable=True,
+        ledger=NodeLedger(
+            total_mb=24000,
+            free_mb=admissible_mb + 512,
+            reserve_mb=0,
+            headroom_mb=512,
+            resident_mb=sum(held.values()),
+            unattributed_mb=0,
+            admissible_mb=admissible_mb,
+        ),
+        residents=[
+            Resident(id=f"morpheus/{s}", node="morpheus", service=s, source=ResidentSource.ARGUS_HTTP, vram_mb=mb)
+            for s, mb in held.items()
+        ],
+    )
+    broker._apply("morpheus", state)
+
+
+async def test_warm_refused_when_the_node_cannot_admit_the_peak_seen() -> None:
+    world = World()
+    broker = broker_for(world)
+    _full_node(broker, admissible_mb=4000, held={"diffusers": 6000})  # seen at 6000 MB
+    _full_node(broker, admissible_mb=1000, held={"diffusers": 100})  # evicted; the card filled up since
+    with pytest.raises(ActionError) as err:
+        await warm_service(broker, "diffusers", poll_s=0)
+    assert err.value.status == 409 and "5900 MB more" in str(err.value)
+    assert not any("/containers/" in c or "/admin/wake" in c for c in world.calls)  # nothing was touched
+
+    result = await warm_service(broker, "diffusers", poll_s=0, force=True)
+    assert result.warmed
+
+
+async def test_warm_uses_the_configured_warm_mb() -> None:
+    config = {**CONFIG, "services": [{**CONFIG["services"][1], "warm_mb": 3000}]}
+    world = World()
+    broker = Broker(
+        BrokerConfig.model_validate(config), client=httpx.AsyncClient(transport=httpx.MockTransport(world.handler))
+    )
+    _full_node(broker, admissible_mb=2999, held={})
+    with pytest.raises(ActionError):
+        await warm_service(broker, "diffusers", poll_s=0)
+    _full_node(broker, admissible_mb=3000, held={})
+    assert (await warm_service(broker, "diffusers", poll_s=0)).warmed
+
+
+async def test_warm_without_a_known_size_is_not_refused() -> None:
+    broker = broker_for(World())
+    _full_node(broker, admissible_mb=0, held={})
+    assert (await warm_service(broker, "diffusers", poll_s=0)).warmed

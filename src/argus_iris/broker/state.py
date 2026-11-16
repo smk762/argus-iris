@@ -195,6 +195,8 @@ class Broker:
         # What a confirmed eviction left each resident holding. Until it grows past that (a model loaded again) the
         # resident counts as evicted: ComfyUI keeps a few hundred MB after /free and says nothing about its models.
         self.residuals: dict[str, int] = {}
+        # The most VRAM each resident has been seen holding, so a manual warm can tell whether it would fit.
+        self.peaks: dict[str, int] = {}
         self.residency = Residency(self, self.policy)
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(config.agent_timeout_s))
         self._adapters = {s.id: build_adapter(s) for s in config.services}
@@ -245,6 +247,9 @@ class Broker:
 
     def _apply(self, name: str, state: NodeState) -> None:
         self.residency.annotate(state)
+        for r in state.residents:
+            if r.vram_mb > self.peaks.get(r.id, 0):
+                self.peaks[r.id] = r.vram_mb
         was = self.nodes.get(name)
         if was and was.reachable != state.reachable:
             log.info("agent_reachability", node=name, reachable=state.reachable, error=state.error)
