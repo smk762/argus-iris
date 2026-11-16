@@ -71,6 +71,15 @@ Run one test: `uv run --no-sync pytest tests/test_x.py::test_name -q`.
 - **Don't 4xx for "busy"** on lease routes: cortex's client treats any 4xx other than 404 as a caller error. Busy is
   `queued`.
 
+## Branches
+
+`dev` is the default branch and the base for every PR, as in the rest of the suite. Cut feature branches from
+`origin/dev` and bring them up to date by merging `origin/dev`, never `main`. Never push work to `main` or open a PR
+against it, except the release PR from `dev`: `main` must never be ahead of `dev`. A release fast-forwards `main` to a
+`dev` commit that passed CI (`git push origin origin/dev:main`), then tags `vX.Y.Z` on it. If `main` is protected, the
+release is a reviewed PR from `dev` into `main`; its merge commit is the one thing `main` may have that `dev` lacks
+(same tree). Leave it there and don't merge `main` back into `dev`.
+
 ## CI / release
 
 CI runs via the shared [`argus-ci`](https://github.com/smk762/argus-ci) reusable workflow. Release publishes to PyPI (OIDC trusted publishing) + GHCR on `v*` tags. Run `copier update` to pull template (CI/release/tooling) changes.
