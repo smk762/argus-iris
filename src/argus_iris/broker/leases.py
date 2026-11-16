@@ -1,26 +1,42 @@
-"""Leases, observe-only (rollout step 3, first half): every request is placed and granted at once, and recorded.
+"""Leases: placement, admission against VRAM, eviction plans, and the liveness rules of DESIGN.md.
 
 The routes and their semantics are DESIGN.md's ("API (v1)", "Scheduling" > "Liveness"): ``request_id`` makes a
 retried POST idempotent, ``resume`` re-attaches running work under the same id, a grant without a first heartbeat is
 reclaimed, a granted lease expires ``ttl_s`` after its last heartbeat, and a queued request that nobody polls is
-dropped. What is *not* here yet is admission: nothing waits for VRAM and nothing is evicted. Instead each grant
-records whether it would have fit (``fits``), so footprints, waits and per-kind usage come from real leases before
-admission is switched on.
+dropped.
 
-Placement follows the target: a service target (``ollama:<model>``, ``comfyui``) goes to the services that serve it,
-in config order (so ``ollama-dragon`` before ``ollama-jarrah``), preferring a node where the model is already
-resident and skipping services that are down. Spilling to the next node *because the first is full* is an admission
-decision and arrives with admission. ``in-process`` goes to the constrained node, the tenant's own node, or the
-first node that meets ``min_cc`` and ``bf16``.
+**Placement** follows the target. A service target (``ollama:<model>``, ``comfyui``) goes to the services that serve
+it, in config order (``ollama-dragon`` before ``ollama-jarrah``), a node where the model is already resident first,
+services that are down last. ``in-process`` goes to the constrained node, the tenant's own node, or any node that
+meets ``min_cc`` and ``bf16``.
 
-:class:`LeaseBook` is synchronous and takes its clock and node view as arguments, so it can be tested without a
-server; the HTTP layer adds long-polling on top.
+**Admission** has two modes (``admission`` in the broker config):
+
+- ``observe`` (the default): every request is granted at once on the first candidate. Each grant records whether it
+  would have fit (``fits``), so footprints and waits come from real leases before admission acts on them.
+- ``enforce``: a lease is granted on the first candidate where it fits (DESIGN.md's inequality, see :func:`_fit`),
+  so a full dragon spills to jarrah. Where none fits, iris plans an eviction on a candidate (idle residents, least
+  recently used first, never busy, pinned, under a live lease, or of a higher class than the request) and grants once
+  the agent sees the memory back; with nothing to evict the lease waits, queued. One that could never fit on any
+  candidate is refused. The queue is served by class, with a wait bonus so nothing starves, and the head's
+  reservation is kept: a lower lease is granted on that node only beside it.
+
+**Eviction plans** avoid thrash and evict as little as they can. A resident of the request's own class may be
+evicted (jarrah's "one model fills the card, keep it moving" needs it), but only once it has been idle, and loaded,
+for ``admission_same_class_idle_s`` (300 s; lower classes need only ``admission_min_idle_s``), so two tenants of one
+class cannot ping-pong a card. Lower classes go first, then the longest idle; victims the shortfall does not need are
+dropped; and across candidate nodes the cheapest plan wins (fewest same-class victims, then fewest MB evicted).
+Within a class the queue serves the tenant holding fewest grants first.
+
+:class:`LeaseBook` is synchronous and takes its clock, node view and an eviction callback as arguments, so it can be
+tested without a server; the broker runs the evictions and the HTTP layer adds long-polling.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 import uuid
 from collections import Counter
 from collections.abc import Callable
@@ -30,6 +46,7 @@ from datetime import datetime, timedelta
 import structlog
 from argus_cortex.gpu_wire import (
     IN_PROCESS,
+    PRIORITY_CLASSES,
     GpuConstraints,
     Heartbeat,
     HeartbeatReply,
@@ -46,7 +63,7 @@ from argus_cortex.gpu_wire import (
 from pydantic import BaseModel
 
 from argus_iris.broker.config import BrokerConfig
-from argus_iris.models import NodeState, utcnow
+from argus_iris.models import NodeState, Resident, ResidentSource, utcnow
 
 log = structlog.get_logger("argus_iris.leases")
 
@@ -54,6 +71,14 @@ FIRST_BEAT_S = 30.0  # a grant with no heartbeat by then is reclaimed (DESIGN.md
 UNPOLLED_MIN_S = 30.0  # ... and a queued request nobody has polled for 2 x wait_s (at least this) is dropped
 RETAIN_S = 600.0  # finished leases stay readable (and idempotent) this long
 ACTIVE: frozenset[str] = frozenset({"queued", "granted"})
+AGING_S = 300.0  # a queued lease gains one priority class per this long waited, so nothing starves
+EVICT_RETRY_S = 60.0  # a resident whose eviction was not confirmed is left alone this long
+_FREED_STATES = frozenset({"unloaded", "cpu"})
+
+
+def _rank(priority: str) -> int:
+    """0 for realtime ... 3 for background."""
+    return PRIORITY_CLASSES.index(priority)
 
 
 class LeaseRecord(BaseModel):
@@ -116,13 +141,13 @@ class LeaseRecord(BaseModel):
 
 
 @dataclass(frozen=True)
-class Placement:
-    node: str | None
-    device: int | None = None
+class Candidate:
+    """A place a lease could run: a node, and for a service target the service and the URL to call there."""
+
+    node: str
+    device: int
     base_url: str | None = None
-    fits: bool | None = None
-    admissible_mb: int | None = None
-    why: str | None = None
+    service: str | None = None
 
 
 def _model_key(name: str | None) -> str | None:
@@ -158,59 +183,58 @@ def _new_mb(rec: LeaseRecord, state: NodeState) -> int:
 
 
 def _fit(
-    node: str, state: NodeState | None, rec: LeaseRecord, others: list[LeaseRecord]
+    node: str, state: NodeState | None, rec: LeaseRecord, granted: list[LeaseRecord], reserved: int = 0
 ) -> tuple[bool | None, int | None]:
-    """Would *rec* fit on *node* beside the leases already granted there? ``(None, None)`` with no ledger."""
+    """Would *rec* fit on *node* beside the leases granted there and *reserved* (the queue head's claim)?
+
+    The ledger's ``admissible_mb`` already holds DESIGN.md's inequality for residents (managed residents + reserve +
+    headroom <= total, and NVML free); granted leases add what is not yet resident. ``(None, None)`` with no ledger.
+    """
     if state is None or state.ledger is None:
         return None, None
-    held = sum(_new_mb(o, state) for o in others if o.node == node and o.state == "granted")
-    admissible = max(0, state.ledger.admissible_mb - held)
+    held = sum(_new_mb(o, state) for o in granted if o.node == node and o is not rec)
+    admissible = max(0, state.ledger.admissible_mb - held - reserved)
     return _new_mb(rec, state) <= admissible, admissible
 
 
-def place(
-    rec: LeaseRecord,
-    constraints: GpuConstraints,
-    home: str | None,
-    config: BrokerConfig,
-    nodes: dict[str, NodeState],
-    others: list[LeaseRecord],
-) -> Placement:
-    """Where *rec* runs. Observe-only: the preferred node, whether or not it fits (``fits`` says which)."""
+def _capacity(state: NodeState | None, config: BrokerConfig, node: str) -> int | None:
+    """The most a lease could ever get on *node*: the card less reserve and headroom. None when unknown."""
+    if state is None or state.ledger is None:
+        return None
+    cfg = config.nodes[node]
+    return state.ledger.total_mb - cfg.reserve_mb - cfg.headroom_mb
+
+
+def candidates(
+    rec: LeaseRecord, constraints: GpuConstraints, home: str | None, config: BrokerConfig, nodes: dict[str, NodeState]
+) -> tuple[list[Candidate], str | None]:
+    """Where *rec* could run, best first, or ``([], why)`` when nowhere."""
     wanted = constraints.node
     if rec.target == IN_PROCESS:
         names = [wanted] if wanted else ([home] if home else list(config.nodes))
         names = [n for n in names if n in config.nodes and _meets(nodes.get(n), constraints)]
         if not names:
-            return Placement(None, why=f"no node meets {constraints.model_dump(exclude_none=True) or 'the request'}")
-        reachable = [n for n in names if (s := nodes.get(n)) and s.reachable] or names
-        fitting = [n for n in reachable if _fit(n, nodes.get(n), rec, others)[0]]
-        node = (fitting or reachable)[0]
-        fits, admissible = _fit(node, nodes.get(node), rec, others)
-        return Placement(node, config.nodes[node].gpu, None, fits, admissible)
+            return [], f"no node meets {constraints.model_dump(exclude_none=True) or 'the request'}"
+        names.sort(key=lambda n: not ((s := nodes.get(n)) and s.reachable))  # stable: reachable first
+        return [Candidate(n, config.nodes[n].gpu) for n in names], None
 
     name = target_service(rec.target)
     services = [s for s in config.services if name in (s.id, s.adapter)]
     services = [s for s in services if (not wanted or s.node == wanted) and _meets(nodes.get(s.node), constraints)]
     if not services:
-        return Placement(None, why=f"no configured service serves {rec.target}" + (f" on {wanted}" if wanted else ""))
-
-    def up(svc_id: str, node: str) -> bool:
-        state = nodes.get(node)
-        return bool(state and any(s.id == svc_id and s.up for s in state.services))
-
-    live = [s for s in services if up(s.id, s.node)] or services  # all down: keep config order and let it fail there
+        return [], f"no configured service serves {rec.target}" + (f" on {wanted}" if wanted else "")
     model = _model_key(target_model(rec.target))
-    warm = [
-        s
-        for s in live
-        if model
-        and (st := nodes.get(s.node))
-        and any(r.service == s.id and _model_key(r.model) == model for r in st.residents)
-    ]
-    svc = (warm or live)[0]
-    fits, admissible = _fit(svc.node, nodes.get(svc.node), rec, others)
-    return Placement(svc.node, config.nodes[svc.node].gpu, svc.base_url, fits, admissible)
+
+    def order(svc) -> tuple[bool, bool]:
+        state = nodes.get(svc.node)
+        up = bool(state and any(s.id == svc.id and s.up for s in state.services))
+        warm = bool(
+            model and state and any(r.service == svc.id and _model_key(r.model) == model for r in state.residents)
+        )
+        return (not up, not warm)  # stable sort keeps config order within each group
+
+    services.sort(key=order)
+    return [Candidate(s.node, config.nodes[s.node].gpu, s.base_url, s.id) for s in services], None
 
 
 class LeaseBook:
@@ -227,6 +251,7 @@ class LeaseBook:
         *,
         clock: Callable[[], datetime] = utcnow,
         on_change: Callable[[LeaseRecord], None] | None = None,
+        evict: Callable[[str, list[str]], None] | None = None,
     ) -> None:
         self.config = config
         self._nodes = nodes
@@ -238,6 +263,13 @@ class LeaseBook:
         self._constraints: dict[str, GpuConstraints] = {}  # per lease: the manifest's, merged with the request's
         self._waiters: dict[str, asyncio.Event] = {}
         self.ended: Counter[tuple[str, str, str]] = Counter()  # (tenant, kind, how it ended) -> count
+        # Admission. *evict* is asked to evict residents for a lease and must call evictions_done when finished.
+        self._evict = evict
+        self._evicting: dict[str, set[str]] = {}  # lease id -> residents being evicted for it
+        self._evict_failed: dict[str, datetime] = {}  # resident id -> when its eviction was last not confirmed
+        self._last_class: dict[tuple[str, str], str] = {}  # (node, model or service) -> class of its last lease
+        self._last_grant: dict[tuple[str, str], datetime] = {}  # (node, model or service) -> its last grant
+        self.evictions: Counter[tuple[str, str]] = Counter()  # (node, "confirmed" | "failed") -> count
 
     # --- tenants -------------------------------------------------------------------------------------------------
 
@@ -269,7 +301,7 @@ class LeaseBook:
             rec.reason = f"not before {rec.not_before.isoformat()}"
             self._changed(rec)
         else:
-            self._grant(rec, now)
+            self._serve_queue(now)
         return rec
 
     def _record(self, req: LeaseRequest, lease_id: str, now: datetime, **override: object) -> LeaseRecord:
@@ -310,42 +342,228 @@ class LeaseBook:
             self._beat(rec, now)
             return rec
         rec = self._record(req, req.resume, now, resumed=True, not_before=None, deadline=None)
-        self._grant(rec, now)
+        cands, why = self._candidates(rec)  # the work is already running: account for it where it is likeliest
+        self._grant(rec, now, cands[0] if cands else None, why=why)
         self._beat(rec, now)  # the work is running: it has, in effect, just heartbeaten
         log.info("lease_resumed", lease=rec.lease_id, tenant=rec.tenant, kind=rec.kind, node=rec.node)
         return rec
 
-    def _grant(self, rec: LeaseRecord, now: datetime) -> None:
+    def _candidates(self, rec: LeaseRecord) -> tuple[list[Candidate], str | None]:
         manifest = self.tenants.get(rec.tenant)
-        others = [o for o in self.leases.values() if o is not rec]
-        where = place(
+        return candidates(
             rec,
             self._constraints.get(rec.lease_id, GpuConstraints()),
             manifest.node if manifest else None,
             self.config,
             self._nodes(),
-            others,
         )
+
+    def _granted(self) -> list[LeaseRecord]:
+        return [o for o in self.leases.values() if o.state == "granted"]
+
+    def _grant(self, rec: LeaseRecord, now: datetime, where: Candidate | None, *, why: str | None = None) -> None:
+        state = self._nodes().get(where.node) if where else None
+        fits, admissible = _fit(where.node, state, rec, self._granted()) if where else (None, None)
         rec.state = "granted"
-        rec.node, rec.device, rec.base_url = where.node, where.device, where.base_url
-        rec.fits, rec.admissible_mb = where.fits, where.admissible_mb
-        rec.reason = where.why or ("observe-only: granted without admission" if where.fits is False else None)
+        rec.node = where.node if where else None
+        rec.device = where.device if where else None
+        rec.base_url = where.base_url if where else None
+        rec.fits, rec.admissible_mb = fits, admissible
+        if why is None and fits is False:
+            why = "observe-only: granted without admission" if self.config.admission == "observe" else None
+        rec.reason = why
         rec.granted_at = now
         # Until the first heartbeat a grant lives only FIRST_BEAT_S (or half its TTL, if longer, so a client that
         # beats every ttl/3 is never reclaimed early).
         rec.expires_at = now + timedelta(seconds=min(rec.ttl_s, max(FIRST_BEAT_S, rec.ttl_s / 2)))
+        if where:
+            key = (where.node, _model_key(target_model(rec.target)) or where.service or "")
+            self._last_class[key], self._last_grant[key] = rec.priority, now
         log.info(
             "lease_granted",
             lease=rec.lease_id,
             tenant=rec.tenant,
             kind=rec.kind,
             target=rec.target,
+            priority=rec.priority,
             node=rec.node,
             vram_mb=rec.vram_mb,
             fits=rec.fits,
+            waited_s=(now - rec.created_at).total_seconds(),
             reason=rec.reason,
         )
         self._changed(rec)
+
+    # --- admission -----------------------------------------------------------------------------------------------
+
+    def _queue(self, now: datetime) -> list[LeaseRecord]:
+        """Queued leases that may start now, in the order they are served.
+
+        By class, raised one class per ``AGING_S`` waited so nothing starves; within a class, the tenant holding the
+        fewest grants first, so one busy tenant cannot hog it; then arrival.
+        """
+        holding = Counter(o.tenant for o in self.leases.values() if o.state == "granted")
+        ready = [r for r in self.leases.values() if r.state == "queued" and (not r.not_before or r.not_before <= now)]
+        ready.sort(
+            key=lambda r: (
+                _rank(r.priority) - int((now - r.created_at).total_seconds() // AGING_S),
+                holding[r.tenant],
+                r.created_at,
+            )
+        )
+        return ready
+
+    def _serve_queue(self, now: datetime) -> None:
+        reserved: Counter[str] = Counter()  # node -> MB claimed by queued leases ahead
+        for rec in self._queue(now):
+            if rec.lease_id in self._evicting:
+                if rec.node:
+                    reserved[rec.node] += rec.vram_mb
+                continue
+            self._admit(rec, now, reserved)
+
+    def _admit(self, rec: LeaseRecord, now: datetime, reserved: Counter[str]) -> None:
+        cands, why = self._candidates(rec)
+        if not cands:
+            self._grant(rec, now, None, why=why)  # nothing iris manages: the caller uses its own URL
+            return
+        if self.config.admission == "observe":
+            self._grant(rec, now, cands[0])
+            return
+
+        nodes, granted = self._nodes(), self._granted()
+        for c in cands:
+            fits, _ = _fit(c.node, nodes.get(c.node), rec, granted, reserved[c.node])
+            if fits is not False:  # fits, or no ledger to say otherwise (agent down): fail open
+                self._grant(rec, now, c)
+                return
+
+        caps = [_capacity(nodes.get(c.node), self.config, c.node) for c in cands]
+        if all(cap is not None for cap in caps) and all(
+            _new_mb(rec, nodes[c.node]) > cap for c, cap in zip(cands, caps, strict=True)
+        ):
+            self._end(
+                rec, "refused", now, reason=f"needs {rec.vram_mb} MB; the most any candidate offers is {max(caps)} MB"
+            )
+            return
+
+        plans = []  # (cost, candidate order, candidate, victims, short)
+        for i, c in enumerate(cands):
+            state = nodes[c.node]
+            _, admissible = _fit(c.node, state, rec, granted, reserved[c.node])
+            short = _new_mb(rec, state) - (admissible or 0)
+            victims = self._plan(rec, c, state, short, granted, now)
+            if victims:
+                same = sum(1 for v in victims if self._class_of(v) == rec.priority)
+                plans.append(((same, sum(v.vram_mb for v in victims)), i, c, victims, short))
+        if plans:
+            _, _, c, victims, short = min(plans, key=lambda p: (p[0], p[1]))
+            ids = [v.id for v in victims]
+            self._evicting[rec.lease_id] = set(ids)
+            rec.node = c.node
+            self._say(rec, f"evicting {', '.join(v.id.split('/', 1)[1] for v in victims)} on {c.node} for {short} MB")
+            reserved[c.node] += rec.vram_mb
+            log.info("admission_evicting", lease=rec.lease_id, node=c.node, short_mb=short, residents=ids)
+            if self._evict is not None:
+                self._evict(rec.lease_id, ids)
+            return
+
+        first = cands[0]
+        _, admissible = _fit(first.node, nodes.get(first.node), rec, granted, reserved[first.node])
+        rec.node = first.node
+        reserved[first.node] += rec.vram_mb  # the head's reservation: nothing lower takes this node's memory
+        self._say(
+            rec,
+            f"waiting for {_new_mb(rec, nodes[first.node]) - (admissible or 0)} MB on {first.node}: nothing idle to evict",
+        )
+
+    def _say(self, rec: LeaseRecord, reason: str) -> None:
+        if rec.reason != reason:
+            rec.reason = reason
+            self._changed(rec)
+
+    def _class_of(self, r: Resident) -> str:
+        """A resident takes the class of the last lease that used it; background if none has."""
+        return self._last_class.get((r.node, _model_key(r.model) or r.service), "background")
+
+    def _plan(
+        self,
+        rec: LeaseRecord,
+        where: Candidate,
+        state: NodeState,
+        short: int,
+        granted: list[LeaseRecord],
+        now: datetime,
+    ) -> list[Resident] | None:
+        """The fewest residents on *where* whose eviction frees *short* MB, or None if no set can.
+
+        Eligible: idle long enough, not busy, pinned, under a live lease, being evicted, recently failed, already
+        unloaded, the model asked for, or of a higher class than the request. A same-class resident must also have
+        been idle, and loaded, for ``admission_same_class_idle_s``. Lower classes are taken first, then the longest
+        idle; then any victim the rest already cover is dropped.
+        """
+        busy = set().union(*self._evicting.values()) if self._evicting else set()
+        here = [o for o in granted if o.node == where.node]
+        in_use_models = {_model_key(target_model(o.target)) for o in here} - {None}
+        in_use_services = {
+            s.id
+            for o in here
+            for s in self.config.services_on(where.node)
+            if target_service(o.target) in (s.id, s.adapter)
+        }
+        wanted = _model_key(target_model(rec.target))
+        mine = _rank(rec.priority)
+        eligible: list[Resident] = []
+        for r in state.residents:
+            key = _model_key(r.model)
+            failed = self._evict_failed.get(r.id)
+            theirs = _rank(self._class_of(r))
+            if (
+                r.source == ResidentSource.PROCESS  # no adapter to evict it
+                or r.busy
+                or r.idle_s is None
+                or r.idle_s < self.config.admission_min_idle_s
+                or r.id in busy
+                or (failed and (now - failed).total_seconds() < EVICT_RETRY_S)
+                or r.detail.get("model_state") in _FREED_STATES  # holds only a context: evicting frees nothing
+                or any(fnmatch.fnmatchcase(r.id, pat) for pat in self.config.pinned)
+                or (key is not None and (key == wanted or key in in_use_models))
+                or (key is None and r.service in in_use_services)
+                or theirs < mine  # a higher class than the request
+            ):
+                continue
+            if theirs == mine:  # same class: only once it has settled, so two tenants cannot ping-pong the card
+                loaded = self._last_grant.get((r.node, key or r.service))
+                settle = self.config.admission_same_class_idle_s
+                if r.idle_s < settle or (loaded and (now - loaded).total_seconds() < settle):
+                    continue
+            eligible.append(r)
+
+        eligible.sort(key=lambda r: (-_rank(self._class_of(r)), -(r.idle_s or 0)))  # lowest class, then idlest
+        victims: list[Resident] = []
+        freed = 0
+        for r in eligible:
+            victims.append(r)
+            freed += r.vram_mb
+            if freed >= short:
+                break
+        else:
+            return None
+        for r in sorted(victims, key=lambda r: r.vram_mb):  # drop what the others already cover, smallest first
+            if freed - r.vram_mb >= short:
+                victims.remove(r)
+                freed -= r.vram_mb
+        return victims
+
+    def evictions_done(self, lease_id: str, failed: list[str]) -> None:
+        """The broker finished evicting for *lease_id*; *failed* were not confirmed. Serve the queue again."""
+        now = self._clock()
+        for rid in self._evicting.pop(lease_id, set()):
+            outcome = "failed" if rid in failed else "confirmed"
+            self.evictions[(rid.split("/", 1)[0], outcome)] += 1
+            if rid in failed:
+                self._evict_failed[rid] = now
+        self._serve_queue(now)
 
     # --- the life of a lease -------------------------------------------------------------------------------------
 
@@ -358,12 +576,14 @@ class LeaseBook:
     def position(self, rec: LeaseRecord) -> int | None:
         if rec.state != "queued":
             return None
-        ahead = 0
-        for other in self.leases.values():  # arrival order
-            if other is rec:
-                return ahead
-            ahead += other.state == "queued"
-        return ahead
+        now = self._clock()
+        ready = self._queue(now)
+        # Leases whose not_before is still ahead come after everything that may start now, soonest first.
+        later = sorted(
+            (r for r in self.leases.values() if r.state == "queued" and r not in ready),
+            key=lambda r: (r.not_before or now, r.created_at),
+        )
+        return (ready + later).index(rec)
 
     def heartbeat(self, lease_id: str, hb: Heartbeat) -> HeartbeatReply | None:
         """``None`` (404) for an unknown or expired lease: the client then re-attaches with ``resume``."""
@@ -392,6 +612,7 @@ class LeaseBook:
             rec.outcome, rec.detail = rel.outcome, rel.detail
             reason = "cancelled while queued" if rec.state == "queued" else None
             self._end(rec, "released", self._clock(), reason=reason)
+            self._serve_queue(self._clock())
         return rec
 
     def tick(self) -> None:
@@ -403,13 +624,12 @@ class LeaseBook:
                     self._end(rec, "refused", now, reason="deadline passed while queued")
                 elif rec.last_poll and (now - rec.last_poll).total_seconds() > max(UNPOLLED_MIN_S, 2 * rec.wait_s):
                     self._end(rec, "expired", now, reason="nobody polled the queued request")
-                elif not rec.not_before or rec.not_before <= now:
-                    self._grant(rec, now)
             elif rec.state == "granted" and rec.expires_at and rec.expires_at <= now:
                 why = "no heartbeat since the grant" if rec.heartbeats == 0 else "no heartbeat within the TTL"
                 self._end(rec, "expired", now, reason=why)
             elif not rec.active and rec.ended_at and (now - rec.ended_at).total_seconds() > RETAIN_S:
                 self._forget(rec)
+        self._serve_queue(now)
 
     def _end(self, rec: LeaseRecord, state: LeaseState, now: datetime, *, reason: str | None = None) -> None:
         rec.state, rec.ended_at, rec.expires_at = state, now, None
@@ -434,6 +654,7 @@ class LeaseBook:
 
     def _forget(self, rec: LeaseRecord) -> None:
         self.leases.pop(rec.lease_id, None)
+        self._evicting.pop(rec.lease_id, None)
         self._constraints.pop(rec.lease_id, None)
         if rec.request_id:
             self._by_request.pop((rec.tenant, rec.request_id), None)

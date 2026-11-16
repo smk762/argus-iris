@@ -2,11 +2,11 @@
 
 VRAM-aware GPU lease broker for the Argus suite: priorities, schedules, keepalive and idle-kill across GPU nodes
 
-Status: observe-only, with leases (rollout step 3, first half). Agents report per-process VRAM, idle time and host RAM;
-the broker composes them with ComfyUI, Ollama and Argus service readings into residents and a per-node ledger. It
-serves the lease API that argus-cortex's `BrokerCoordinator` calls, places each lease on a node and records it, but
-grants every request at once: nothing is admitted against VRAM or evicted yet. Each grant records whether admission
-would have let it in. The one action is a manual warm (below). See [DESIGN.md](DESIGN.md).
+Status: rollout step 3 (leases and admission). Agents report per-process VRAM, idle time and host RAM; the broker
+composes them with ComfyUI, Ollama and Argus service readings into residents and a per-node ledger, and serves the lease
+API that argus-cortex's `BrokerCoordinator` calls. With `admission: observe` (the default) it grants every lease at once
+and records whether it would have fit; with `admission: enforce` it queues what does not fit, spills to the next node,
+and evicts idle residents to make room. Idle-kill and keepalive (step 4) are next. See [DESIGN.md](DESIGN.md).
 
 ## Run
 
