@@ -22,7 +22,8 @@ Not checked out? Read https://github.com/smk762/argus-cortex/blob/dev/SUITE.md
 
 ## Layout
 
-`src/argus_iris/` — the package. Rollout step 2 (observe-only): nothing admits, evicts or warms yet.
+`src/argus_iris/` — the package. Rollout step 3, first half: leases are served and placed but granted without
+admission; nothing evicts yet.
 
 - `models.py` — agent snapshot (`NodeSnapshot`, `GpuProcess`, …) and the broker's read models (`NodeState`,
   `Resident`, `NodeLedger`). Lease and tenant-manifest models are **not** here: import them from
@@ -34,11 +35,16 @@ Not checked out? Read https://github.com/smk762/argus-cortex/blob/dev/SUITE.md
 - `broker/` — `config.py` (YAML, `IRIS_CONFIG`), `adapters/` (comfyui, ollama, argus-http; read-only),
   argus-http validates `/health` as cortex's `ResidentHealth` and reads older shapes best-effort, logging
   `resident_off_contract` (and `detail.off_contract` on the resident); a truthy non-bool `busy` counts as busy,
-  `state.py` (`Broker` polls agents and adapters; `compose_node` is the pure accounting), `actions.py` (manual
-  warm: agent starts the container, wait for health, call `warm_path`).
+  `state.py` (`Broker` polls agents and adapters, ticks the lease book every second; `compose_node` is the pure
+  accounting), `leases.py` (`LeaseBook`: tenants, placement via `place()`, request_id idempotency, `resume`,
+  heartbeat/TTL expiry, the 30 s first-beat reclaim, unpolled-queue drop; synchronous with an injectable clock, so test
+  it by moving the clock and calling `tick()`), `actions.py` (manual warm: agent starts the container, wait for
+  health, call `warm_path`).
 - `server/app.py` — the broker API (`[server]` extra, `argus-iris serve`, :8120): `/nodes`, `/residents`, `/events`
-  (SSE), `/metrics`, `/health`, `/ui/`, and `POST /services/{id}/warm` (needs `ARGUS_GPU_BROKER_TOKEN`). Wrapped in cortex's
-  `WriteGuard`.
+  (SSE: `node` and `lease` events), `/metrics`, `/health`, `/ui/`, the lease routes (`POST /tenants`, `POST /leases`,
+  `GET /leases/{id}?wait_s=`, `.../heartbeat`, `.../release`, `GET /leases`, `/queue`, `/tenants`; bearer token
+  checked only when `ARGUS_GPU_BROKER_TOKEN` is set) and `POST /services/{id}/warm` (needs that token). Wrapped in
+  cortex's `WriteGuard`. Test the lease routes with cortex's own `BrokerCoordinator` over `httpx.ASGITransport`.
 - `ui/` — the dashboard, served by the broker at `/ui/` (`/` redirects). Plain HTML and ES modules with no build
   step, shipped in the wheel (the pattern argus-mask and argus-survey use). It is a thin client over `/health`,
   `/config` and `/events`, and the warm POST, so it never computes what the broker decides. `vendor/dh/` holds

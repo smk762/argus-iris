@@ -1,7 +1,10 @@
-"""The broker's FastAPI app (observe-only): node state, residents, an SSE change stream and Prometheus metrics.
+"""The broker's FastAPI app: node state, residents, leases, an SSE change stream and Prometheus metrics.
 
-Serve with ``argus-iris serve`` or ``uvicorn --factory argus_iris.server.app:create_app``. No route changes state yet;
-the shared WriteGuard is installed anyway so the lease and eviction routes of later steps are covered from the start.
+Serve with ``argus-iris serve`` or ``uvicorn --factory argus_iris.server.app:create_app``. The lease routes are
+DESIGN.md's "API (v1)" with argus-cortex's wire models; they grant without admission for now (observe-only, see
+:mod:`argus_iris.broker.leases`). Every write passes the shared WriteGuard. The lease routes take
+``Authorization: Bearer $ARGUS_GPU_BROKER_TOKEN`` when the broker has that token set, and are open when it does not;
+manual actions (warm) are disabled until it is set.
 """
 
 from __future__ import annotations
@@ -15,22 +18,32 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import structlog
+from argus_cortex.gpu_wire import (
+    Heartbeat,
+    HeartbeatReply,
+    LeaseRelease,
+    LeaseRequest,
+    LeaseStatus,
+    TenantManifest,
+)
 from argus_cortex.server import WriteGuard, cross_site_refuse
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
-from prometheus_client.core import GaugeMetricFamily
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 import argus_iris
 from argus_iris.broker.actions import ActionError, WarmResult, warm_service
 from argus_iris.broker.config import BrokerConfig, load_config
+from argus_iris.broker.leases import LeaseRecord
 from argus_iris.broker.state import Broker
 from argus_iris.models import NodeState, Resident
 
 log = structlog.get_logger("argus_iris.server")
 
 SSE_KEEPALIVE_S = 15.0
+MAX_WAIT_S = 60.0  # longest a GET /leases/{id} is held; the client asks for 20 s
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
 
@@ -78,7 +91,41 @@ class _BrokerCollector:
                     queue.add_metric([s.node, s.id, "running"], s.queue_running)
                 if s.queue_pending is not None:
                     queue.add_metric([s.node, s.id, "pending"], s.queue_pending)
+        llabels = ["node", "tenant", "kind", "state"]
+        leases = GaugeMetricFamily("iris_leases", "Leases queued or granted now", labels=llabels)
+        lease_mb = GaugeMetricFamily(
+            "iris_lease_vram_mb", "VRAM declared by leases queued or granted now", labels=llabels
+        )
+        unfit = GaugeMetricFamily(
+            "iris_leases_over_admissible",
+            "Granted leases that admission would not have granted (observe-only)",
+            labels=["node", "tenant", "kind"],
+        )
+        count: dict[tuple[str, ...], int] = {}
+        mb: dict[tuple[str, ...], int] = {}
+        over: dict[tuple[str, ...], int] = {}
+        for rec in self.broker.leases.active():
+            key = (rec.node or "", rec.tenant, rec.kind, rec.state)
+            count[key] = count.get(key, 0) + 1
+            mb[key] = mb.get(key, 0) + rec.vram_mb
+            if rec.fits is False:
+                over[key[:3]] = over.get(key[:3], 0) + 1
+        for key, n in count.items():
+            leases.add_metric(list(key), n)
+            lease_mb.add_metric(list(key), mb[key])
+        for key, n in over.items():
+            unfit.add_metric(list(key), n)
+        ended = CounterMetricFamily(
+            "iris_leases_ended",
+            "Leases ended, by how: ok, failed, oom, cancelled, expired, refused",
+            labels=["tenant", "kind", "how"],
+        )
+        for (tenant, kind, how), n in self.broker.leases.ended.items():
+            ended.add_metric([tenant, kind, how], n)
+        tenants = GaugeMetricFamily("iris_tenants", "Tenants that registered a manifest")
+        tenants.add_metric([], len(self.broker.leases.tenants))
         yield from (up, total, free, admissible, unattributed, ram, rvram, ridle, svc_up, queue)
+        yield from (leases, lease_mb, unfit, ended, tenants)
 
 
 def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = None, poll: bool = True) -> FastAPI:
@@ -113,6 +160,7 @@ def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = No
             "version": argus_iris.__version__,
             "mode": "observe-only",
             "polls": broker.polls,
+            "leases": {"active": len(broker.leases.active()), "tenants": len(broker.leases.tenants)},
             "agents": agents,
         }
 
@@ -137,13 +185,15 @@ def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = No
                 # Current state first, so a fresh page needs no separate fetch.
                 for state in list(broker.nodes.values()):
                     yield f"event: node\ndata: {state.model_dump_json()}\n\n"
+                for rec in broker.leases.active():
+                    yield f"event: lease\ndata: {rec.model_dump_json()}\n\n"
                 while not await request.is_disconnected():
                     try:
-                        state = await asyncio.wait_for(queue.get(), SSE_KEEPALIVE_S)
+                        kind, item = await asyncio.wait_for(queue.get(), SSE_KEEPALIVE_S)
                     except TimeoutError:
                         yield ": keepalive\n\n"
                         continue
-                    yield f"event: node\ndata: {state.model_dump_json()}\n\n"
+                    yield f"event: {kind}\ndata: {item.model_dump_json()}\n\n"
 
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
@@ -151,10 +201,12 @@ def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = No
     async def metrics() -> Response:
         return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 
-    def require_caller(authorization: str | None) -> None:
+    def check_caller(authorization: str | None, *, required: bool) -> None:
         token = os.environ.get(config.caller_token_env, "")
         if not token:
-            raise HTTPException(403, f"manual actions are disabled: {config.caller_token_env} is not set")
+            if required:
+                raise HTTPException(403, f"manual actions are disabled: {config.caller_token_env} is not set")
+            return
         scheme, _, presented = (authorization or "").partition(" ")
         if scheme.lower() != "bearer" or not hmac.compare_digest(presented.encode(), token.encode()):
             raise HTTPException(401, "bad or missing bearer token", headers={"WWW-Authenticate": "Bearer"})
@@ -162,11 +214,73 @@ def create_app(config: BrokerConfig | None = None, *, broker: Broker | None = No
     @app.post("/services/{service_id}/warm", response_model=WarmResult)
     async def warm(service_id: str, authorization: str | None = Header(default=None)) -> WarmResult:
         """Bring a service back: start its container through the agent if it is down, then call its warm_path."""
-        require_caller(authorization)
+        check_caller(authorization, required=True)
         try:
             return await warm_service(broker, service_id)
         except ActionError as exc:
             raise HTTPException(exc.status, str(exc)) from exc
+
+    # --- leases (DESIGN.md "API (v1)"). Busy is never a 4xx: cortex's client raises on any 4xx but 404. ----------
+
+    leases = broker.leases
+
+    def status_of(rec: LeaseRecord) -> LeaseStatus:
+        return rec.status(leases.position(rec))
+
+    @app.post("/tenants")
+    async def register_tenant(manifest: TenantManifest, authorization: str | None = Header(default=None)) -> dict:
+        check_caller(authorization, required=False)
+        changed = leases.register(manifest)
+        return {"tenant": manifest.tenant, "kinds": [k.kind for k in manifest.kinds], "changed": changed}
+
+    @app.get("/tenants", response_model=list[TenantManifest])
+    async def tenants() -> list[TenantManifest]:
+        return list(leases.tenants.values())
+
+    @app.post("/leases", response_model=LeaseStatus)
+    async def request_lease(req: LeaseRequest, authorization: str | None = Header(default=None)) -> LeaseStatus:
+        check_caller(authorization, required=False)
+        rec = leases.request(req)
+        if rec.state == "queued" and req.wait_s > 0:
+            rec = await leases.wait(rec.lease_id, min(req.wait_s, MAX_WAIT_S)) or rec
+        return status_of(rec)
+
+    @app.get("/leases", response_model=list[LeaseRecord])
+    async def list_leases(node: str | None = None, tenant: str | None = None, all: bool = False) -> list[LeaseRecord]:
+        """Leases queued or granted now; ``all=true`` adds the recently ended ones."""
+        recs = leases.leases.values() if all else leases.active()
+        return [r for r in recs if (node is None or r.node == node) and (tenant is None or r.tenant == tenant)]
+
+    @app.get("/queue", response_model=list[LeaseRecord])
+    async def queue() -> list[LeaseRecord]:
+        return sorted((r for r in leases.active() if r.state == "queued"), key=lambda r: r.created_at)
+
+    @app.get("/leases/{lease_id}", response_model=LeaseStatus)
+    async def get_lease(lease_id: str, wait_s: float = Query(0.0, ge=0)) -> LeaseStatus:
+        rec = await leases.wait(lease_id, min(wait_s, MAX_WAIT_S))
+        if rec is None:
+            raise HTTPException(404, f"no lease {lease_id!r}")
+        return status_of(rec)
+
+    @app.post("/leases/{lease_id}/heartbeat", response_model=HeartbeatReply)
+    async def heartbeat(
+        lease_id: str, body: Heartbeat | None = None, authorization: str | None = Header(default=None)
+    ) -> HeartbeatReply:
+        check_caller(authorization, required=False)
+        reply = leases.heartbeat(lease_id, body or Heartbeat())
+        if reply is None:
+            raise HTTPException(404, f"no live lease {lease_id!r}: re-attach with resume")
+        return reply
+
+    @app.post("/leases/{lease_id}/release", response_model=LeaseStatus)
+    async def release(
+        lease_id: str, body: LeaseRelease | None = None, authorization: str | None = Header(default=None)
+    ) -> LeaseStatus:
+        check_caller(authorization, required=False)
+        rec = leases.release(lease_id, body or LeaseRelease())
+        if rec is None:
+            raise HTTPException(404, f"no lease {lease_id!r}")
+        return status_of(rec)
 
     @app.get("/config")
     async def show_config() -> dict:

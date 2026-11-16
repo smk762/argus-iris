@@ -2,9 +2,11 @@
 
 VRAM-aware GPU lease broker for the Argus suite: priorities, schedules, keepalive and idle-kill across GPU nodes
 
-Status: observe-only (rollout step 2). Agents report per-process VRAM, idle time and host RAM; the broker composes
-them with ComfyUI, Ollama and Argus service readings into residents and a per-node ledger. Nothing is admitted or
-evicted yet; the one action is a manual warm (below). See [DESIGN.md](DESIGN.md).
+Status: observe-only, with leases (rollout step 3, first half). Agents report per-process VRAM, idle time and host RAM;
+the broker composes them with ComfyUI, Ollama and Argus service readings into residents and a per-node ledger. It
+serves the lease API that argus-cortex's `BrokerCoordinator` calls, places each lease on a node and records it, but
+grants every request at once: nothing is admitted against VRAM or evicted yet. Each grant records whether admission
+would have let it in. The one action is a manual warm (below). See [DESIGN.md](DESIGN.md).
 
 ## Run
 
@@ -23,8 +25,15 @@ unless `IRIS_AGENT_TOKEN` is set, and apply only to containers in `IRIS_AGENT_CO
 The broker, on morpheus (see [deploy/iris.example.yaml](deploy/iris.example.yaml)):
 
 ```bash
-argus-iris serve --config iris.yaml   # :8120 — /nodes, /residents, /events, /metrics, /health
+argus-iris serve --config iris.yaml   # :8120 — /nodes, /residents, /leases, /tenants, /events, /metrics, /health
 ```
+
+Callers take leases with `ARGUS_GPU_COORDINATOR=broker` and `ARGUS_GPU_BROKER_URL=http://<broker>:8120` (argus-cortex
+0.7+). A service target goes to the configured services that serve it, in config order (`ollama-dragon` before
+`ollama-jarrah`), preferring a node where the model is already loaded and skipping services that are down; the grant
+carries that node and its `base_url`. When `ARGUS_GPU_BROKER_TOKEN` is set on the broker, the lease routes require it
+as a bearer token; unset, they are open. `GET /leases` lists what is queued or granted (`?all=true` adds the last ten
+minutes' finished leases).
 
 One manual action exists: bring a service back up. If its health check fails, the node's agent starts its container
 (it must be on that agent's `IRIS_AGENT_CONTAINERS`), and iris waits for it to answer:
@@ -36,7 +45,8 @@ curl -X POST -H "Authorization: Bearer $ARGUS_GPU_BROKER_TOKEN" http://morpheus:
 It needs `ARGUS_GPU_BROKER_TOKEN` (callers) and `IRIS_AGENT_TOKEN` (matching the agents') set on the broker.
 
 The broker also serves a dashboard at `http://<broker>:8120/ui/` (`/` redirects there): VRAM per node split into
-residents, unattributed, held-back and admissible memory, plus residents with idle times, services and a warm button.
+residents, unattributed, held-back and admissible memory, plus residents with idle times, services with a warm button,
+and the node's leases (marked "over" where admission would have refused them).
 It updates live from `/events`. To warm from the page, enter `ARGUS_GPU_BROKER_TOKEN` under "Broker token". It is kept
 in that tab's session storage only.
 
