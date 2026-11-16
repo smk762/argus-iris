@@ -229,11 +229,14 @@ def create_app(
             raise HTTPException(401, "bad or missing bearer token", headers={"WWW-Authenticate": "Bearer"})
 
     @app.post("/services/{service_id}/warm", response_model=WarmResult)
-    async def warm(service_id: str, authorization: str | None = Header(default=None)) -> WarmResult:
-        """Bring a service back: start its container through the agent if it is down, then call its warm_path."""
+    async def warm(
+        service_id: str, force: bool = False, authorization: str | None = Header(default=None)
+    ) -> WarmResult:
+        """Bring a service back: start its container through the agent if it is down, then call its warm_path.
+        Refused with 409 while the node cannot admit what the service takes warm, unless ``force``."""
         check_caller(authorization, required=True)
         try:
-            return await warm_service(broker, service_id)
+            return await warm_service(broker, service_id, force=force)
         except ActionError as exc:
             raise HTTPException(exc.status, str(exc)) from exc
 

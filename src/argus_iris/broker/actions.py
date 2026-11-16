@@ -92,13 +92,39 @@ def _reply(resp: httpx.Response, model: type[_M]) -> _M | None:
         return None
 
 
-async def warm_service(broker: Broker, service_id: str, *, poll_s: float | None = None) -> WarmResult:
+def _warm_room(broker: Broker, svc: ServiceConfig) -> None:
+    """Refuse a warm the node has no room for: a model loading into a full card fails part way (an OOM that leaves the
+    service holding memory in an error state) and can take a running job down with it."""
+    state = broker.nodes.get(svc.node)
+    if state is None or state.ledger is None:
+        return
+    base = f"{svc.node}/{svc.id}"
+    seen = [mb for rid, mb in broker.peaks.items() if rid == base or rid.startswith(base + "/")]
+    want = svc.warm_mb if svc.warm_mb is not None else max(seen, default=0)
+    if not want:
+        return
+    ledger = state.ledger
+    held = sum(r.vram_mb for r in state.residents if r.service == svc.id)
+    need = want - held
+    if need > ledger.admissible_mb:
+        raise ActionError(
+            f"{svc.node} has {ledger.admissible_mb} MB admissible and warming {svc.id} needs about {need} MB more "
+            f"({want} MB warm, {held} MB held): free room first, or pass force=true",
+            409,
+        )
+
+
+async def warm_service(
+    broker: Broker, service_id: str, *, poll_s: float | None = None, force: bool = False
+) -> WarmResult:
     poll_s = WARM_POLL_S if poll_s is None else poll_s
     svc = next((s for s in broker.config.services if s.id == service_id), None)
     if svc is None:
         raise ActionError(f"no service {service_id!r}", 404)
     if svc.adapter == "ollama":
         raise ActionError("an Ollama model is warmed by a lease naming it, not per service", 422)
+    if not force:
+        _warm_room(broker, svc)
     adapter = broker.adapter(svc.id)
     result = WarmResult(service=svc.id, node=svc.node, up=False)
 
