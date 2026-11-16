@@ -31,7 +31,7 @@ services:
     node: jarrah
     adapter: ollama
     base_url: http://jarrah:11434
-    container: ollama
+    container: mithrandir-ollama   # jarrah's Ollama runs in mithrandir's (Immich) compose project
   # voluptas (smk762/voluptas#22): /health carries model_state, busy, idle_s; /admin/unload and /admin/wake.
   - id: image-gen-diffusers
     node: morpheus
