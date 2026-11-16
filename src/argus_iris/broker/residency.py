@@ -12,7 +12,8 @@ are handed over one at a time (#6).
 - **Idle-kill** (``idle_kill``): once due, the resident is evicted through its adapter (to the CPU where the service
   can). Until then an Ollama model's ``keep_alive`` is extended before it runs out, so with ``OLLAMA_KEEP_ALIVE=server``
   iris, not Ollama's default, decides when it goes.
-- **Restart** (``restart_residual_mb``): a resident that is unloaded but still holds at least this much VRAM (a CUDA
+- **Restart** (``restart_residual_mb``): a resident that is unloaded (not merely on the CPU, where a restart would
+  throw away the warm copy) but still holds at least this much VRAM (a CUDA
   context, an allocator cache: modernbert's 94 MB, Miso's 2 GB) and is due is restarted through its node's agent,
   which only restarts containers on its own allowlist.
 """
@@ -109,7 +110,12 @@ class Residency:
             return None, None
         if r.source == ResidentSource.PROCESS:
             return None, "due, but iris has no adapter for it"
-        if r.detail.get("model_state") in _FREED or self.evicted(r):
+        state = r.detail.get("model_state")
+        if state == "cpu":
+            # Evicted to the CPU: warm in host RAM, and what it still holds on the GPU is the price of that. A
+            # restart would throw the warm copy away, so only once the service has unloaded it fully.
+            return None, f"on the CPU ({r.vram_mb} MB left)" if r.vram_mb else "on the CPU"
+        if state in _FREED or self.evicted(r):
             svc = next((s for s in self.broker.config.services if s.id == r.service), None)
             if rule.restart_residual_mb is not None and r.vram_mb >= rule.restart_residual_mb and svc and svc.container:
                 return "restart", f"unloaded but holding {r.vram_mb} MB: restart {svc.container}"
