@@ -4,7 +4,7 @@
 const api = (path) => new URL(`../${path}`, location.href);
 const $ = (sel, root = document) => root.querySelector(sel);
 const TOKEN_KEY = "iris-broker-token";
-const SLOTS = 8; // dh categorical slots; a 9th service on a node folds into "other"
+const SLOTS = 8; // dh categorical slots: 1-7 name a service, the last is "other", where an 8th service folds
 
 const nodes = new Map(); // name -> NodeState (latest)
 const leases = new Map(); // lease_id -> LeaseRecord, queued or granted only
@@ -42,10 +42,10 @@ function el(tag, props = {}, ...kids) {
 function slotFor(node, service) {
   let m = colours.get(node);
   if (!m) colours.set(node, (m = new Map()));
-  if (!m.has(service)) m.set(service, m.size < SLOTS ? m.size + 1 : 0);
+  if (!m.has(service)) m.set(service, m.size < SLOTS - 1 ? m.size + 1 : 0);
   return m.get(service);
 }
-const colourVar = (slot) => (slot ? `var(--dh-cat-${slot})` : "var(--dh-cat-8)");
+const colourVar = (slot) => `var(--dh-cat-${slot || SLOTS})`; // slot 0 ("other") alone gets the last colour
 function seedColours(state) {
   // Configured services first, in config order, so a service keeps its colour whether or not it is loaded.
   for (const s of config?.services ?? []) if (s.node === state.name) slotFor(state.name, s.id);

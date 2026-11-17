@@ -12,7 +12,7 @@ from test_evict import CONFIG, SINGGUARD
 from test_evict import World as Dragon
 
 from argus_iris.broker.config import BrokerConfig
-from argus_iris.broker.policy import Cron, Policy, load_policy, parse_duration
+from argus_iris.broker.policy import Cron, Policy, ResidentRule, load_policy, parse_duration
 from argus_iris.broker.state import Broker
 from argus_iris.models import Resident, ResidentSource
 
@@ -67,6 +67,35 @@ def test_windows_open_across_midnight_in_the_policy_zone():
     assert p.window_class("ai-code-auditor", "comfyui", None, at) is None
     assert p.window_class("someone-else", "ollama:qwen3:8b", None, at) is None
     assert p.window_class("ai-code-auditor", "ollama:qwen3:8b", None, at + timedelta(hours=3)) is None
+
+
+def test_node_scoped_window_does_not_match_a_lease_with_no_node():
+    p = Policy.model_validate(
+        {
+            "windows": [
+                {
+                    "name": "dragon-batch",
+                    "cron": "0 1 * * *",
+                    "duration": "2h",
+                    "tenant": "t",
+                    "node": "dragon",
+                    "class": "batch",
+                },
+            ],
+        }
+    )
+    at = datetime(2026, 11, 17, 1, 30, tzinfo=UTC)
+    assert p.window_class("t", "ollama:x", "dragon", at) == ("dragon-batch", "batch")
+    assert p.window_class("t", "ollama:x", "jarrah", at) is None
+    assert p.window_class("t", "ollama:x", None, at) is None  # unplaced: may land off dragon
+
+
+@pytest.mark.parametrize("bad", [-5, float("nan"), float("inf"), ".inf", "9" * 400, "-5s"])
+def test_durations_must_be_finite_and_not_negative(bad):
+    with pytest.raises(ValueError):
+        parse_duration(bad)
+    with pytest.raises(ValidationError):
+        ResidentRule.model_validate({"idle_kill": bad})
 
 
 def test_first_matching_rule_wins_and_ollama_matches_only_ollama():

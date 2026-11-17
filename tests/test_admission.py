@@ -127,6 +127,20 @@ def test_evicts_idle_residents_least_recently_used_first_then_grants():
     assert w.book.evictions[("dragon", "confirmed")] == 1
 
 
+def test_without_an_evictor_a_lease_waits_instead_of_sticking_in_evicting():
+    w = World()
+    w.book._evict = None  # LeaseBook allows it: nothing would ever call evictions_done
+    w.nodes["dragon"] = node("dragon", 1000, [res("dragon", "ollama-dragon", 3000, model="old:7b", idle=900)])
+    w.nodes["jarrah"] = node("jarrah", 0)
+    rec = w.ask(target="ollama:qwen3:8b", vram_mb=4000)
+    assert (rec.state, rec.reason) == ("queued", "waiting for 3000 MB on dragon: eviction is off")
+    assert w.book._evicting == {}
+
+    w.nodes["dragon"] = node("dragon", 4500)  # the memory frees by itself
+    w.book.tick()
+    assert (rec.state, rec.node) == ("granted", "dragon")
+
+
 @pytest.mark.parametrize(
     "spared",
     [

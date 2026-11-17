@@ -239,6 +239,10 @@ def candidates(
     return [Candidate(s.node, config.nodes[s.node].gpu, s.base_url, s.id) for s in services], None
 
 
+class LeaseConflict(ValueError):
+    """The request names a lease that is not the caller's (a caller error, not "busy")."""
+
+
 class LeaseBook:
     """Every lease the broker knows, and the tenants that registered a manifest.
 
@@ -353,6 +357,9 @@ class LeaseBook:
         """Re-attach running work under its old id: granted at once, whatever the book says (DESIGN.md, API)."""
         assert req.resume
         rec = self.leases.get(req.resume)
+        if rec is not None and rec.tenant != req.tenant:
+            # Re-attaching would keep another tenant's grant alive; re-recording would replace its lease.
+            raise LeaseConflict(f"lease {req.resume!r} belongs to another tenant")
         if rec is not None and rec.state == "granted":
             self._beat(rec, now)
             return rec
@@ -472,7 +479,7 @@ class LeaseBook:
             if victims:
                 same = sum(1 for v in victims if self._class_of(v) == rec.priority)
                 plans.append(((same, sum(v.vram_mb for v in victims)), i, c, victims, short))
-        if plans:
+        if plans and self._evict is not None:  # no evictor: nothing would ever finish the plan, so wait instead
             _, _, c, victims, short = min(plans, key=lambda p: (p[0], p[1]))
             ids = [v.id for v in victims]
             self._evicting[rec.lease_id] = set(ids)
@@ -480,8 +487,7 @@ class LeaseBook:
             self._say(rec, f"evicting {', '.join(v.id.split('/', 1)[1] for v in victims)} on {c.node} for {short} MB")
             reserved[c.node] += rec.vram_mb
             log.info("admission_evicting", lease=rec.lease_id, node=c.node, short_mb=short, residents=ids)
-            if self._evict is not None:
-                self._evict(rec.lease_id, ids)
+            self._evict(rec.lease_id, ids)
             return
 
         first = cands[0]
@@ -490,7 +496,8 @@ class LeaseBook:
         reserved[first.node] += rec.vram_mb  # the head's reservation: nothing lower takes this node's memory
         self._say(
             rec,
-            f"waiting for {_new_mb(rec, nodes[first.node]) - (admissible or 0)} MB on {first.node}: nothing idle to evict",
+            f"waiting for {_new_mb(rec, nodes[first.node]) - (admissible or 0)} MB on {first.node}: "
+            + ("nothing idle to evict" if self._evict is not None else "eviction is off"),
         )
 
     def _say(self, rec: LeaseRecord, reason: str) -> None:

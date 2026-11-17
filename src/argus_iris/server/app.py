@@ -36,7 +36,7 @@ from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 import argus_iris
 from argus_iris.broker.actions import ActionError, EvictMode, EvictResult, WarmResult, evict_resident, warm_service
 from argus_iris.broker.config import BrokerConfig, load_config
-from argus_iris.broker.leases import LeaseRecord
+from argus_iris.broker.leases import LeaseConflict, LeaseRecord
 from argus_iris.broker.policy import Policy, load_policy
 from argus_iris.broker.state import Broker
 from argus_iris.models import NodeState, Resident
@@ -272,7 +272,10 @@ def create_app(
     @app.post("/leases", response_model=LeaseStatus)
     async def request_lease(req: LeaseRequest, authorization: str | None = Header(default=None)) -> LeaseStatus:
         check_caller(authorization, required=False)
-        rec = leases.request(req)
+        try:
+            rec = leases.request(req)
+        except LeaseConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         if rec.state == "queued" and req.wait_s > 0:
             rec = await leases.wait(rec.lease_id, min(req.wait_s, MAX_WAIT_S)) or rec
         return status_of(rec)

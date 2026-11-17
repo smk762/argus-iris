@@ -10,7 +10,7 @@ from argus_cortex.gpu_wire import GpuConstraints, Heartbeat, LeaseRelease, Lease
 from fastapi.testclient import TestClient
 
 from argus_iris.broker.config import BrokerConfig
-from argus_iris.broker.leases import LeaseBook
+from argus_iris.broker.leases import LeaseBook, LeaseConflict
 from argus_iris.broker.state import Broker
 from argus_iris.models import GpuInfo, NodeLedger, NodeState, Resident, ResidentSource, ServiceState
 from argus_iris.server.app import create_app
@@ -224,6 +224,20 @@ def test_resume_re_attaches_under_the_same_id(world):
     assert ask(book, resume=fresh.lease_id) is fresh and fresh.heartbeats == 2
 
 
+def test_resume_refuses_another_tenants_lease(world):
+    book, _, clock = world
+    granted = ask(book, target="ollama:qwen3:8b", vram_mb=1000)
+    with pytest.raises(LeaseConflict):
+        ask(book, tenant="intruder", resume=granted.lease_id)
+    assert granted.heartbeats == 0  # not kept alive by someone else's beat
+
+    queued = ask(book, target="ollama:qwen3:8b", vram_mb=1000, not_before=clock.now + timedelta(hours=1))
+    assert queued.state == "queued"
+    with pytest.raises(LeaseConflict):
+        ask(book, tenant="intruder", resume=queued.lease_id)
+    assert book.leases[queued.lease_id] is queued and queued.tenant == "agent-composer"
+
+
 def test_release_records_the_outcome(world):
     book, _, _ = world
     rec = ask(book)
@@ -290,7 +304,8 @@ def coordinator(app, **kw) -> BrokerCoordinator:
     return BrokerCoordinator("http://iris", tenant="agent-composer", async_transport=httpx.ASGITransport(app=app), **kw)
 
 
-async def test_cortex_client_takes_and_releases_a_lease():
+async def test_cortex_client_takes_and_releases_a_lease(monkeypatch):
+    monkeypatch.delenv("ARGUS_GPU_BROKER_TOKEN", raising=False)  # the client sends none
     broker = broker_with({n: node(n) for n in CONFIG.nodes})
     app = create_app(broker=broker, poll=False)
     coord = coordinator(app, manifest=MANIFEST)
@@ -319,6 +334,7 @@ async def test_a_refusal_reads_back_over_http():
 
 
 def test_routes_and_auth(monkeypatch):
+    monkeypatch.delenv("ARGUS_GPU_BROKER_TOKEN", raising=False)  # the open case must not depend on the shell
     broker = broker_with({n: node(n) for n in CONFIG.nodes})
     client = TestClient(create_app(broker=broker, poll=False))
     body = {"tenant": "agent-composer", "target": "ollama:qwen3:8b", "vram_mb": 100}
@@ -343,12 +359,19 @@ def test_routes_and_auth(monkeypatch):
 
     # With a token set, a wrong one is a 401: a caller bug cortex's client surfaces instead of falling back.
     monkeypatch.setenv("ARGUS_GPU_BROKER_TOKEN", "tok")
-    assert client.post("/leases", json=body).status_code == 401
+    assert client.post("/leases", json=body, headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.post("/leases", json=body).status_code == 401  # and so is none at all
     ok = client.post("/leases", json=body, headers={"Authorization": "Bearer tok"})
     assert ok.status_code == 200
-    assert (
-        client.post("/leases", json={"tenant": "Bad Slug"}, headers={"Authorization": "Bearer tok"}).status_code == 422
-    )
+    # Only the tenant is bad, so the 422 is the slug check and not a missing field.
+    bad = client.post("/leases", json={**body, "tenant": "Bad Slug"}, headers={"Authorization": "Bearer tok"})
+    assert bad.status_code == 422
+    assert [e["loc"][-1] for e in bad.json()["detail"]] == ["tenant"]
+
+    # Resuming another tenant's lease is refused, not re-attached.
+    theirs = ok.json()["lease_id"]
+    hijack = {**body, "tenant": "someone-else", "resume": theirs}
+    assert client.post("/leases", json=hijack, headers={"Authorization": "Bearer tok"}).status_code == 409
 
 
 async def test_cortex_client_raises_on_a_bad_token(monkeypatch):

@@ -5,6 +5,7 @@ Only what the agent needs, so it does not pull in the Docker SDK.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -12,10 +13,19 @@ import httpx
 from argus_iris.models import ContainerAction
 
 DEFAULT_SOCKET = "/var/run/docker.sock"
+# Docker's container name grammar (an ID matches it too). It has no "/", "?" or "#", so a ref cannot step out of
+# /containers/{ref}/ to another Engine endpoint on the root-equivalent socket.
+_REF = re.compile(r"/?[a-zA-Z0-9][a-zA-Z0-9_.-]*")
 
 
 class DockerError(RuntimeError):
     pass
+
+
+def _checked(ref: str) -> str:
+    if not _REF.fullmatch(ref):
+        raise DockerError(f"not a container name or ID: {ref!r}")
+    return ref.lstrip("/")
 
 
 @dataclass(frozen=True)
@@ -55,7 +65,7 @@ class DockerClient:
     async def inspect(self, ref: str) -> ContainerInfo | None:
         """A container by ID or name; ``None`` when it does not exist."""
         try:
-            resp = await self._client.get(f"/containers/{ref}/json")
+            resp = await self._client.get(f"/containers/{_checked(ref)}/json")
         except httpx.HTTPError as exc:
             raise DockerError(f"docker unreachable: {exc}") from exc
         if resp.status_code == 404:
@@ -67,7 +77,7 @@ class DockerClient:
     async def act(self, name: str, action: ContainerAction) -> str:
         """Run *action*; returns ``"done"`` or ``"unchanged"`` (already in that state)."""
         try:
-            resp = await self._client.post(f"/containers/{name}/{action.value}")
+            resp = await self._client.post(f"/containers/{_checked(name)}/{action.value}")
         except httpx.HTTPError as exc:
             raise DockerError(f"docker unreachable: {exc}") from exc
         if resp.status_code == 204:

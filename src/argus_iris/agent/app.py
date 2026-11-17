@@ -80,6 +80,7 @@ class Agent:
         self.snapshot: NodeSnapshot | None = None
         self.last_poll_monotonic: float | None = None
         self.docker_error: str | None = None
+        self._poll_docker_error: str | None = None  # this poll's, published to docker_error when it ends
 
     async def aclose(self) -> None:
         await self.docker.aclose()
@@ -91,9 +92,8 @@ class Agent:
         if cid not in self._containers:
             try:
                 self._containers[cid] = await self.docker.inspect(cid)
-                self.docker_error = None
             except DockerError as exc:
-                self.docker_error = str(exc)
+                self._poll_docker_error = str(exc)
                 return None  # not cached: retry next poll
         return self._containers[cid]
 
@@ -106,6 +106,7 @@ class Agent:
         return self._pid_cgroup[pid]
 
     async def poll_once(self) -> NodeSnapshot:
+        self._poll_docker_error = None
         sample = await asyncio.to_thread(self._sample)
         now, wall = self._clock(), utcnow()
         if sample.error:
@@ -148,8 +149,8 @@ class Agent:
             try:
                 info = await self.docker.inspect(name)
             except DockerError as exc:
-                self.docker_error = str(exc)
-                break
+                self._poll_docker_error = str(exc)
+                continue
             if info and info.running and info.pid:
                 text = procfs.read_cgroup(self.settings.proc_root, info.pid)
                 path = procfs.cgroup_v2_path(text) if text else None
@@ -173,6 +174,7 @@ class Agent:
             nvml_error=sample.error,
         )
         self.last_poll_monotonic = now
+        self.docker_error = self._poll_docker_error  # a Docker failure is reported only while it lasts
         return self.snapshot
 
     async def act(self, name: str, action: ContainerAction) -> ActionResult:
