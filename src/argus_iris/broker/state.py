@@ -122,12 +122,16 @@ def compose_node(
     state.gpu = next((g for g in snapshot.gpus if g.index == cfg.gpu), None)
     procs = [p for p in snapshot.processes if p.gpu == cfg.gpu]
 
+    anon = {c.container: c.anon_mb for c in snapshot.containers}
     claimed: set[int] = set()
     managed_mb = 0
     for svc, reading in services:
         mine = [p for p in procs if svc.container and p.container == svc.container]
         claimed.update(p.pid for p in mine)
         residents = _service_residents(name, svc, reading, mine)
+        if svc.container in anon:
+            for r in residents:
+                r.host_ram_mb = anon[svc.container]
         if svc.adapter == "ollama" and reading.models:
             # The runner processes can hold more than the models' share (CUDA context, KV cache): count the larger.
             managed_mb += max(sum(r.vram_mb for r in residents), sum(p.vram_mb for p in mine))

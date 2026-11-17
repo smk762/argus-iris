@@ -21,6 +21,9 @@ residents:                           # first matching rule wins; ids/models/serv
   - match: { resident: "dragon/xtts" }
     idle_kill: 120s                  # GPU -> CPU (evict_path), kept warm in host RAM ...
     unload_after: 600s               # ... then unloaded fully after 10 more minutes idle
+  - match: { resident: "morpheus/comfyui" }
+    idle_kill: 30m
+    restart_host_ram_mb: 12288       # idle 2 min (restart_host_ram_idle) with > 12 GiB host RAM: restart it
 ```
 
 Each rule acts only with ``enforce: true``, so residents are handed over one at a time (#6): turn a resident's own
@@ -168,6 +171,11 @@ class ResidentRule(_Model):
     # timer does not run once its *_KEEP_ALIVE_GPU is -1, so iris has to own this stage too.
     unload_after: Duration | None = None
     restart_residual_mb: int | None = Field(None, ge=0)
+    # Restart the container once it has been idle `restart_host_ram_idle` and its anonymous memory (cgroup) is above
+    # this: ComfyUI's host RAM grows with use and only a restart returns it (voluptas#16). Unset, the tenant
+    # manifest's `host_ram_restart_mb` hint for the resident's container applies.
+    restart_host_ram_mb: int | None = Field(None, gt=0)
+    restart_host_ram_idle: Duration = 120.0
     enforce: bool = False
 
 

@@ -18,6 +18,10 @@ are handed over one at a time (#6).
   throw away the warm copy) but still holds at least this much VRAM (a CUDA
   context, an allocator cache: modernbert's 94 MB, Miso's 2 GB) and is due is restarted through its node's agent,
   which only restarts containers on its own allowlist.
+- **Host RAM** (``restart_host_ram_mb``, else the tenant manifest's ``host_ram_restart_mb``): a resident whose
+  container's anonymous memory is above it, and which has been idle ``restart_host_ram_idle`` (120 s), is restarted
+  the same way. ComfyUI keeps offloaded weights in host RAM and only a restart returns them (voluptas#16). A restart
+  throws away whatever the service has loaded, so never while pinned, busy or under a lease.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from argus_iris.broker.config import ServiceConfig
 from argus_iris.broker.policy import Policy, ResidentRule
 from argus_iris.models import NodeState, Resident, ResidentPolicy, ResidentSource, utcnow
 
@@ -75,6 +80,24 @@ class Residency:
             seen.append(max(0.0, (now - last).total_seconds()))
         return min(seen) if seen else None
 
+    def _service(self, r: Resident) -> ServiceConfig | None:
+        return next((s for s in self.broker.config.services if s.id == r.service and s.node == r.node), None)
+
+    def host_ram_limit(self, r: Resident, rule: ResidentRule) -> int | None:
+        """The rule's ``restart_host_ram_mb``, else a registered manifest's hint for the resident's container."""
+        if rule.restart_host_ram_mb is not None:
+            return rule.restart_host_ram_mb
+        svc = self._service(r)
+        if svc is None or not svc.container:
+            return None
+        for manifest in self.broker.leases.tenants.values():
+            if manifest.node and manifest.node != r.node:
+                continue
+            for tr in manifest.residents:
+                if tr.container == svc.container and tr.host_ram_restart_mb:
+                    return tr.host_ram_restart_mb
+        return None
+
     def view(self, r: Resident, now: datetime) -> ResidentPolicy | None:
         match = self.policy.rule_for(r)
         if match is None:
@@ -96,6 +119,20 @@ class Residency:
         )
 
     def _decide(
+        self, r: Resident, rule: ResidentRule, pinned: bool, due: float | None, idle: float | None, now: datetime
+    ) -> tuple[str | None, str | None]:
+        ram_note = None
+        limit = None if pinned else self.host_ram_limit(r, rule)
+        svc = self._service(r)
+        if limit is not None and r.host_ram_mb is not None and r.host_ram_mb > limit and svc and svc.container:
+            held = f"holding {r.host_ram_mb} MB of host RAM (over {limit})"
+            if idle is not None and idle >= rule.restart_host_ram_idle:
+                return "restart", f"idle and {held}: restart {svc.container}"
+            ram_note = f"{held}: restart once idle {int(rule.restart_host_ram_idle)}s"
+        nxt, note = self._decide_vram(r, rule, pinned, due, idle, now)
+        return nxt, note or ram_note
+
+    def _decide_vram(
         self, r: Resident, rule: ResidentRule, pinned: bool, due: float | None, idle: float | None, now: datetime
     ) -> tuple[str | None, str | None]:
         ollama = r.source == ResidentSource.OLLAMA
@@ -123,7 +160,7 @@ class Residency:
                 return None, f"on the CPU; unload in {int(left_s)}s"
             return None, f"on the CPU ({r.vram_mb} MB left)" if r.vram_mb else "on the CPU"
         if state in _FREED or self.evicted(r):
-            svc = next((s for s in self.broker.config.services if s.id == r.service), None)
+            svc = self._service(r)
             if rule.restart_residual_mb is not None and r.vram_mb >= rule.restart_residual_mb and svc and svc.container:
                 return "restart", f"unloaded but holding {r.vram_mb} MB: restart {svc.container}"
             return None, f"unloaded ({r.vram_mb} MB left)" if r.vram_mb else "unloaded"
@@ -148,6 +185,7 @@ class Residency:
         )
 
         now = self._clock()
+        restarted: set[tuple[str, str]] = set()  # (node, container): Ollama's models share one container
         for r in self.broker.residents():
             v = r.policy
             if v is None or not v.enforce or v.next is None:
@@ -156,6 +194,11 @@ class Residency:
             if until and now < until:
                 continue
             self._cooldown[r.id] = now + timedelta(seconds=COOLDOWN_S)
+            svc = self._service(r)
+            if v.next == "restart":
+                if svc is None or not svc.container or (r.node, svc.container) in restarted:
+                    continue
+                restarted.add((r.node, svc.container))
             outcome = "ok"
             try:
                 if v.next == "pin":
@@ -169,8 +212,7 @@ class Residency:
                     # Off the GPU already: this frees host RAM, which NVML cannot confirm. The service's word is it.
                     result = await evict_resident(self.broker, r.id, mode="unload", reason="idle-kill: unload_after")
                     outcome = "ok" if result.model_state == "unloaded" else "failed"
-                elif v.next == "restart":
-                    svc = next(s for s in self.broker.config.services if s.id == r.service)
+                elif v.next == "restart" and svc is not None:
                     await container_action(self.broker, svc, "restart")
             except ActionError as exc:
                 outcome = "failed"

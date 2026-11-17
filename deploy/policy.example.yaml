@@ -45,3 +45,4 @@ residents:                         # first matching rule wins; fnmatch patterns
     restart_residual_mb: 512
   - match: { resident: "morpheus/comfyui" }
     idle_kill: 30m                 # replaces COMFYUI_IDLE_TIMEOUT_SECONDS
+    restart_host_ram_mb: 12288     # idle 120 s with more host RAM than this: restart (COMFYUI_MEM_RESTART_MB, #20)
