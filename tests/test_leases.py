@@ -10,7 +10,7 @@ from argus_cortex.gpu_wire import GpuConstraints, Heartbeat, LeaseRelease, Lease
 from fastapi.testclient import TestClient
 
 from argus_iris.broker.config import BrokerConfig
-from argus_iris.broker.leases import LeaseBook, LeaseConflict
+from argus_iris.broker.leases import LeaseBook
 from argus_iris.broker.state import Broker
 from argus_iris.models import GpuInfo, NodeLedger, NodeState, Resident, ResidentSource, ServiceState
 from argus_iris.server.app import create_app
@@ -227,13 +227,13 @@ def test_resume_re_attaches_under_the_same_id(world):
 def test_resume_refuses_another_tenants_lease(world):
     book, _, clock = world
     granted = ask(book, target="ollama:qwen3:8b", vram_mb=1000)
-    with pytest.raises(LeaseConflict):
+    with pytest.raises(ValueError, match="another tenant"):  # LeaseConflict, a caller error
         ask(book, tenant="intruder", resume=granted.lease_id)
     assert granted.heartbeats == 0  # not kept alive by someone else's beat
 
     queued = ask(book, target="ollama:qwen3:8b", vram_mb=1000, not_before=clock.now + timedelta(hours=1))
     assert queued.state == "queued"
-    with pytest.raises(LeaseConflict):
+    with pytest.raises(ValueError, match="another tenant"):  # LeaseConflict, a caller error
         ask(book, tenant="intruder", resume=queued.lease_id)
     assert book.leases[queued.lease_id] is queued and queued.tenant == "agent-composer"
 
