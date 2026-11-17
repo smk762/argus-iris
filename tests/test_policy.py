@@ -262,3 +262,80 @@ async def test_unload_after_frees_the_cpu_stage_too():
     assert dragon.calls[-1] == "POST http://dragon:9150/r/xtts/admin/unload"
     assert dragon.state["xtts"] == "unloaded"
     assert broker.residency.actions[("dragon", "unload", "ok")] == 1  # no VRAM moved, and that is not a failure
+
+
+# --- host RAM (#20): ComfyUI's grows with use and only a restart returns it --------------------------------------
+
+# The fake world is idle 60 s everywhere, under the 120 s default.
+COMFY_RAM = {
+    "match": {"resident": "morpheus/comfyui"},
+    "restart_host_ram_mb": 12288,
+    "restart_host_ram_idle": "30s",
+    "enforce": True,
+}
+
+
+async def test_idle_container_over_its_host_ram_limit_is_restarted(monkeypatch):
+    monkeypatch.setenv("IRIS_AGENT_TOKEN", "agent-tok")
+    dragon, broker = await make([COMFY_RAM])
+    dragon.anon["voluptas_comfyui"] = 9000
+    await broker.poll_once()
+    comfy = next(r for r in broker.residents() if r.id == "morpheus/comfyui")
+    assert comfy.host_ram_mb == 9000 and comfy.policy.next is None  # under the limit
+    dragon.anon["voluptas_comfyui"] = 14000
+    await broker.poll_once()
+    v = view(broker, "morpheus/comfyui")
+    assert (v.next, v.note) == (
+        "restart",
+        "idle and holding 14000 MB of host RAM (over 12288): restart voluptas_comfyui",
+    )
+    await broker.residency.step()
+    assert dragon.calls == ["POST http://morpheus:9110/containers/voluptas_comfyui/restart"]
+    assert broker.residency.actions[("morpheus", "restart", "ok")] == 1
+
+
+async def test_host_ram_restart_waits_for_idle_and_spares_busy_leased_and_pinned():
+    dragon, broker = await make([{**COMFY_RAM, "restart_host_ram_idle": "5m"}])
+    dragon.anon["voluptas_comfyui"] = 14000
+    await broker.poll_once()
+    v = view(broker, "morpheus/comfyui")  # idle 60 s of 300
+    assert (v.next, v.note) == (None, "holding 14000 MB of host RAM (over 12288): restart once idle 300s")
+
+    dragon, broker = await make([COMFY_RAM])
+    dragon.anon["voluptas_comfyui"], dragon.comfy_queue = 14000, 1
+    await broker.poll_once()
+    assert view(broker, "morpheus/comfyui").next is None  # a job in the queue
+    dragon.comfy_queue = 0
+    broker.leases.request(LeaseRequest(tenant="t", target="comfyui", node="morpheus", vram_mb=100))
+    await broker.poll_once()
+    v = view(broker, "morpheus/comfyui")
+    assert (v.idle_s, v.next) == (0, None)  # under a lease
+
+    dragon, broker = await make([{**COMFY_RAM, "keepalive": "always"}])
+    dragon.anon["voluptas_comfyui"] = 14000
+    await broker.poll_once()
+    assert view(broker, "morpheus/comfyui").next is None
+    await broker.residency.step()
+    assert dragon.calls == []
+
+
+async def test_host_ram_limit_defaults_to_the_tenant_manifest_hint():
+    from argus_cortex.gpu_wire import TenantManifest
+
+    dragon, broker = await make(
+        [{"match": {"resident": "morpheus/comfyui"}, "idle_kill": "1h", "restart_host_ram_idle": 30}]
+    )
+    dragon.anon["voluptas_comfyui"] = 14000
+    await broker.poll_once()
+    assert view(broker, "morpheus/comfyui").next is None  # no limit anywhere
+    broker.leases.register(
+        TenantManifest(
+            tenant="voluptas",
+            residents=[
+                {"name": "comfyui", "adapter": "comfyui", "container": "voluptas_comfyui", "host_ram_restart_mb": 12288}
+            ],
+        )
+    )
+    await broker.poll_once()
+    v = view(broker, "morpheus/comfyui")
+    assert (v.enforce, v.next) == (False, "restart")  # reported; acting still needs the rule's enforce

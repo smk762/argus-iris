@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from argus_iris.broker.actions import ActionError, evict_resident
 from argus_iris.broker.config import BrokerConfig
 from argus_iris.broker.state import Broker
-from argus_iris.models import GpuInfo, GpuProcess, NodeSnapshot
+from argus_iris.models import ContainerMemory, GpuInfo, GpuProcess, NodeSnapshot
 from argus_iris.server.app import create_app
 
 T0 = datetime(2026, 11, 16, tzinfo=UTC)
@@ -71,6 +71,7 @@ class World:
         self.busy_on_post: dict[str, int] = {}  # work that arrives between iris's health read and its POST
         self.residual = {"whisper": 94}  # CUDA context left behind after an unload
         self.frees_memory = True
+        self.anon: dict[str, int] = {}  # container -> cgroup anon MB, as the agent reports it
         self.calls: list[str] = []
 
     def _snap(self, node: str) -> dict:
@@ -87,6 +88,7 @@ class World:
             agent_version="t",
             gpus=[GpuInfo(index=0, name="g", uuid=node, total_mb=8192, free_mb=8192 - used, used_mb=used)],
             processes=procs,
+            containers=[ContainerMemory(container=n, anon_mb=mb) for n, mb in self.anon.items() if n in names],
         ).model_dump(mode="json")
 
     def handler(self, request: httpx.Request) -> httpx.Response:

@@ -118,6 +118,7 @@ class Resident(BaseModel):
     vram_mb: int
     idle_s: float | None = None
     busy: bool = False  # the service reports work in flight (ComfyUI queue, ...)
+    host_ram_mb: int | None = None  # its container's anonymous memory (cgroup), when the agent reports it
     expires_at: datetime | None = None  # Ollama keep_alive expiry
     detail: dict = Field(default_factory=dict)
     policy: ResidentPolicy | None = None  # set when a policy rule matches
