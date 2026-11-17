@@ -223,6 +223,7 @@ async def test_refusals(setup, rid, mode, status):
 
 
 def test_route_needs_the_token_and_takes_ids_with_slashes(monkeypatch):
+    monkeypatch.delenv("ARGUS_GPU_BROKER_TOKEN", raising=False)  # "no token configured" must not depend on the shell
     world = World()
     broker = Broker(
         BrokerConfig.model_validate(CONFIG), client=httpx.AsyncClient(transport=httpx.MockTransport(world.handler))

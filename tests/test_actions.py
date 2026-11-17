@@ -124,6 +124,9 @@ async def test_warm_needs_the_agent_token(monkeypatch) -> None:
 
 
 def test_warm_route_auth(monkeypatch) -> None:
+    monkeypatch.delenv(
+        "ARGUS_GPU_BROKER_TOKEN", raising=False
+    )  # the "no token configured" 403 must not depend on the shell
     world = World()
     with TestClient(create_app(broker=broker_for(world), poll=False)) as client:
         r = client.post("/services/comfyui/warm")

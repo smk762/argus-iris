@@ -37,6 +37,7 @@ Sunday; when both day fields are restricted either may match, as in cron). No de
 from __future__ import annotations
 
 import fnmatch
+import math
 import os
 import re
 from datetime import datetime, timedelta
@@ -57,11 +58,16 @@ _UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400, None: 1}
 def parse_duration(value: object) -> float:
     """``90``, ``"90s"``, ``"15m"``, ``"5h"``, ``"1.5d"`` -> seconds."""
     if isinstance(value, int | float) and not isinstance(value, bool):
-        return float(value)
-    m = _DURATION.match(str(value))
-    if not m:
-        raise ValueError(f"not a duration: {value!r} (use e.g. 90s, 15m, 5h, 2d)")
-    return float(m.group(1)) * _UNIT_S[m.group(2)]
+        seconds = float(value)
+    else:
+        m = _DURATION.match(str(value))
+        if not m:
+            raise ValueError(f"not a duration: {value!r} (use e.g. 90s, 15m, 5h, 2d)")
+        seconds = float(m.group(1)) * _UNIT_S[m.group(2)]
+    # YAML's .inf/.nan and a long enough digit string would otherwise make a window or timer that never ends.
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError(f"not a duration: {value!r} (must be finite and not negative)")
+    return seconds
 
 
 Duration = Annotated[float, BeforeValidator(parse_duration), Field(ge=0)]
@@ -214,7 +220,7 @@ class Policy(_Model):
         for w in self.windows:
             if w.tenant != tenant or (w.target and not fnmatch.fnmatchcase(target, w.target)):
                 continue
-            if w.node and node and w.node != node:
+            if w.node and w.node != node:  # a lease with no node may be placed anywhere, so it is not in the window
                 continue
             if w.cron.open_since(local, w.duration) is not None:
                 return w.name, w.class_
