@@ -250,6 +250,23 @@ function renderNode(state) {
   renderLeases(state.name);
 }
 
+// Progress is what the caller reports with its heartbeat (cortex GpuLease.report_progress); the broker only relays it.
+function progressCell(l) {
+  if (l.state !== "granted" || (l.progress == null && !l.stage)) return el("td", { class: "meta", text: "–" });
+  const p = l.progress;
+  const elapsed = since(l.granted_at);
+  // Linear ETA from the grant: rough, and only once there is enough done to extrapolate from.
+  const left = p != null && p >= 0.05 && p < 1 && elapsed != null ? (elapsed * (1 - p)) / p : null;
+  const label = [p != null ? `${Math.round(p * 100)}%` : null, left != null ? `~${dur(left)} left` : null]
+    .filter(Boolean).join(" · ");
+  return el("td", { class: "progress-cell" },
+    p != null ? el("div", { class: "progress", role: "progressbar", "aria-valuemin": 0, "aria-valuemax": 100,
+      "aria-valuenow": Math.round(p * 100), "aria-label": `${l.tenant} progress` },
+      el("div", { class: "fill", style: { width: `${(p * 100).toFixed(1)}%` } })) : null,
+    label ? el("span", { class: "sub", text: label }) : null,
+    l.stage ? el("span", { class: "svc-err", text: l.stage, title: l.stage }) : null);
+}
+
 function renderLeases(name) {
   const node = document.getElementById(`node-${name}`);
   if (!node) return;
@@ -262,16 +279,23 @@ function renderLeases(name) {
     const st = l.state === "queued" ? "queued" : over ? "granted · over" : "granted";
     const why = [l.reason, l.caller && `caller ${l.caller}`, l.admissible_mb != null && `${gb(l.admissible_mb)} admissible at grant`]
       .filter(Boolean).join(" · ");
+    // Size: weights the service keeps after the lease vs the working set held only while it runs, and what the
+    // caller says it really peaked at (heartbeats), so a manifest that over- or under-asks shows.
+    const split = l.model_mb ? `${gb(l.model_mb)} model · ${gb(l.vram_mb - l.model_mb)} work` : null;
+    const peak = l.peak_vram_mb != null ? `peak ${gb(l.peak_vram_mb)}` : null;
     return el("tr", {},
-      el("td", {}, `${l.tenant} · `, el("span", { class: "meta", text: l.kind })),
+      el("td", {}, `${l.tenant} · `, el("span", { class: "meta", text: l.kind }),
+        l.caller ? el("span", { class: "svc-err", text: l.caller, title: l.caller }) : null),
       el("td", { text: l.target }),
       el("td", { class: "meta", text: l.priority + (l.preemptible ? " · preemptible" : "") }),
-      el("td", { class: "num", text: l.vram_mb ? gb(l.vram_mb) : "–" }),
+      el("td", { class: "num" }, l.vram_mb ? gb(l.vram_mb) : "–",
+        split || peak ? el("span", { class: "sub", text: [split, peak].filter(Boolean).join(" · ") }) : null),
       el("td", { class: "num", "data-idle": since(from) ?? "", "data-at": Date.now(), text: dur(since(from)) }),
+      progressCell(l),
       el("td", { class: `state ${over ? "busy" : ""}`, title: why || null }, st,
         // A queued lease says what it waits for (evicting X, waiting for N MB): the point of looking at the queue.
         l.state === "queued" && l.reason ? el("span", { class: "svc-err", text: l.reason }) : null));
-  }) : [el("tr", {}, el("td", { colSpan: 6, class: "none", text: "no leases" }))]));
+  }) : [el("tr", {}, el("td", { colSpan: 7, class: "none", text: "no leases" }))]));
 }
 
 function placeNode(node, name) {

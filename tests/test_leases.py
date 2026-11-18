@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -196,6 +197,23 @@ def test_heartbeats_keep_a_lease_and_silence_expires_it(world):
     assert (rec.state, rec.reason) == ("expired", "no heartbeat within the TTL")
     assert book.heartbeat(rec.lease_id, Heartbeat()) is None  # 404: the client re-attaches
     assert book.ended[("agent-composer", "default", "expired")] == 1
+
+
+def test_heartbeat_progress_is_kept_and_published_only_when_it_changes():
+    nodes = {n: node(n) for n in CONFIG.nodes}
+    seen: list[tuple] = []
+    book = LeaseBook(CONFIG, lambda: nodes, clock=Clock(), on_change=lambda r: seen.append((r.state, r.progress)))
+    rec = ask(book)
+    seen.clear()
+    # A lease_version 1.1 heartbeat by attribute, so this runs on cortex before and after the fields landed.
+    beat = SimpleNamespace(peak_vram_mb=None, progress=0.4, stage="checkpoint 2/5")
+    book.heartbeat(rec.lease_id, beat)
+    assert (rec.progress, rec.stage) == (0.4, "checkpoint 2/5") and seen == [("granted", 0.4)]
+    book.heartbeat(rec.lease_id, beat)
+    book.heartbeat(rec.lease_id, Heartbeat())  # a beat without progress keeps the last one
+    assert rec.progress == 0.4 and len(seen) == 1
+    book.heartbeat(rec.lease_id, Heartbeat(peak_vram_mb=700))
+    assert len(seen) == 2
 
 
 def test_a_grant_never_heartbeaten_is_reclaimed_early(world):
