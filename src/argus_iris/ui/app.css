@@ -137,6 +137,10 @@ td.none { color: var(--dh-muted); font-style: italic; }
 .status-down::before { content: "✕ "; color: var(--dh-danger); }
 .svc-err { display: block; color: var(--dh-muted); font-size: var(--dh-text-2xs); max-width: 28ch; overflow-wrap: anywhere; }
 .svc-err.would { font-style: italic; }
+td .sub { display: block; color: var(--dh-muted); font-size: var(--dh-text-2xs); font-weight: normal; }
+.progress-cell { min-width: 8rem; }
+.progress { height: .45rem; border-radius: var(--dh-radius-pill); background: var(--dh-surface-2); overflow: hidden; }
+.progress .fill { height: 100%; background: var(--dh-accent); transition: width var(--dh-dur) var(--dh-ease); }
 .result { display: block; font-size: var(--dh-text-2xs); margin-block-start: .2rem; }
 .result.ok { color: var(--dh-success-ink); }
 .result.err { color: var(--dh-danger-ink); }

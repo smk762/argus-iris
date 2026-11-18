@@ -107,6 +107,8 @@ class LeaseRecord(BaseModel):
     resumed: bool = False
     heartbeats: int = 0
     peak_vram_mb: int | None = None
+    progress: float | None = None  # 0-1, from the caller's heartbeat (cortex lease_version 1.1); shown, never acted on
+    stage: str | None = None  # what the work says it is doing now
     outcome: ReleaseOutcome | None = None
     detail: str | None = None
     created_at: datetime
@@ -615,10 +617,18 @@ class LeaseBook:
         if rec is None or rec.state == "expired":
             return None
         now = self._clock()
+        shown = (rec.peak_vram_mb, rec.progress, rec.stage)
         if hb.peak_vram_mb is not None:
             rec.peak_vram_mb = max(rec.peak_vram_mb or 0, hb.peak_vram_mb)
+        # getattr: cortex before lease_version 1.1 has no progress on Heartbeat.
+        if (progress := getattr(hb, "progress", None)) is not None:
+            rec.progress = progress
+        if (stage := getattr(hb, "stage", None)) is not None:
+            rec.stage = stage
         if rec.state == "granted":
             self._beat(rec, now)
+        if (rec.peak_vram_mb, rec.progress, rec.stage) != shown and self._on_change is not None:
+            self._on_change(rec)  # the dashboard only; not _changed, which would wake a long poll for no state change
         return HeartbeatReply(state=rec.state, ttl_s=rec.ttl_s, reason=rec.reason if rec.state != "granted" else None)
 
     def _beat(self, rec: LeaseRecord, now: datetime) -> None:
