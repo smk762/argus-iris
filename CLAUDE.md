@@ -38,7 +38,7 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
   `state.py` (`Broker` polls agents and adapters, ticks the lease book every second; `compose_node` is the pure
   accounting), `leases.py` (`LeaseBook`: tenants, `candidates()` (placement order), admission (`_serve_queue`: class order
   with aging, head reservation, spill, `_plan` eviction plans run by the broker's `_evict_for`), request_id idempotency, `resume`,
-  heartbeat/TTL expiry (a beat also carries `progress`/`stage`, published to `/events` when they change), the 30 s first-beat reclaim, unpolled-queue drop; synchronous with an injectable clock, so test
+  heartbeat/TTL expiry (a beat also carries `progress`/`stage`, published to `/events` when they change), the 30 s first-beat reclaim, the stall watchdog (`_watch`: heartbeating with no GPU activity for `lease_stall_s` -> `stalled_at`, `yield_requested` while it blocks the queue, reclaimed as `refused` only with `lease_stall_reclaim`), unpolled-queue drop; synchronous with an injectable clock, so test
   it by moving the clock and calling `tick()`), `policy.py` (the operator's YAML: cron, windows, resident rules; `IRIS_POLICY`), `residency.py` (`Residency`:
   per-resident `ResidentPolicy` view on every poll, `step()` acts on enforced rules: pin/extend Ollama keep_alive,
   idle-kill evict, `unload_after` (CPU stage -> unloaded; confirmed by the reply, since only RAM moves), restart

@@ -5,6 +5,13 @@ retried POST idempotent, ``resume`` re-attaches running work under the same id, 
 reclaimed, a granted lease expires ``ttl_s`` after its last heartbeat, and a queued request that nobody polls is
 dropped.
 
+**Stalls.** A heartbeat proves the client is alive, not that it is working: a keepalive loop that outlives its job
+holds the reservation forever. So a granted lease with no GPU activity for ``lease_stall_s`` (its resident never busy
+or recently used, no ``progress``/``stage``/``peak_vram_mb`` change; for a target with no resident, GPU utilisation
+on the node) is marked stalled. While a queued lease waits on its node, its heartbeat replies set ``yield_requested``;
+with ``lease_stall_reclaim`` it is ended ``refused`` once it has ignored that for ``lease_stall_s / 2``, so the
+keepalive's ``resume`` cannot re-grant it.
+
 **Placement** follows the target. A service target (``ollama:<model>``, ``comfyui``) goes to the services that serve
 it, in config order (``ollama-dragon`` before ``ollama-jarrah``), a node where the model is already resident first,
 services that are down last. ``in-process`` goes to the constrained node, the tenant's own node, or any node that
@@ -74,6 +81,8 @@ RETAIN_S = 600.0  # finished leases stay readable (and idempotent) this long
 ACTIVE: frozenset[str] = frozenset({"queued", "granted"})
 AGING_S = 300.0  # a queued lease gains one priority class per this long waited, so nothing starves
 EVICT_RETRY_S = 60.0  # a resident whose eviction was not confirmed is left alone this long
+YIELD_REASON = "stalled: no GPU activity under the lease while another waits for the node"
+RECENT_USE_S = 60.0  # a lease's resident idle less than this counts as GPU activity under the lease
 _FREED_STATES = frozenset({"unloaded", "cpu"})
 
 
@@ -107,8 +116,13 @@ class LeaseRecord(BaseModel):
     resumed: bool = False
     heartbeats: int = 0
     peak_vram_mb: int | None = None
-    progress: float | None = None  # 0-1, from the caller's heartbeat (cortex lease_version 1.1); shown, never acted on
+    progress: float | None = (
+        None  # 0-1, from the caller's heartbeat (cortex lease_version 1.1); a change counts as activity
+    )
     stage: str | None = None  # what the work says it is doing now
+    active_at: datetime | None = None  # the last sign of GPU work under a granted lease (see LeaseBook._watch)
+    stalled_at: datetime | None = None  # when it was marked stalled: heartbeating, but no GPU activity
+    yield_requested: bool = False  # a stalled lease blocks a queued one: its heartbeats ask it to give the GPU back
     outcome: ReleaseOutcome | None = None
     detail: str | None = None
     created_at: datetime
@@ -284,6 +298,7 @@ class LeaseBook:
         self.policy = policy or Policy()
         self._last_used: dict[tuple[str, str], datetime] = {}  # (node, model or service) -> when its last lease ended
         self._services: dict[str, str | None] = {}  # lease id -> the service it was granted on
+        self._reclaimed: dict[str, datetime] = {}  # lease id -> when a stall reclaimed it (resume must not re-grant)
 
     # --- tenants -------------------------------------------------------------------------------------------------
 
@@ -300,6 +315,8 @@ class LeaseBook:
     def request(self, req: LeaseRequest) -> LeaseRecord:
         now = self._clock()
         if req.resume:
+            if req.resume in self._reclaimed:
+                return self._refuse_reclaimed(req, now)
             return self._resume(req, now)
         if req.request_id and (known := self._by_request.get((req.tenant, req.request_id))) in self.leases:
             rec = self.leases[known]
@@ -355,6 +372,16 @@ class LeaseBook:
         self._constraints[lease_id] = constraints
         return rec
 
+    def _refuse_reclaimed(self, req: LeaseRequest, now: datetime) -> LeaseRecord:
+        """A stalled lease that was reclaimed stays ended: its keepalive's resume gets the refusal back."""
+        rec = self.leases.get(req.resume or "")
+        if rec is not None and rec.tenant != req.tenant:
+            raise LeaseConflict(f"lease {req.resume!r} belongs to another tenant")
+        if rec is None:  # forgotten since: answer with a fresh refused record under the old id
+            rec = self._record(req, req.resume or "", now, resumed=True)
+            self._end(rec, "refused", now, reason="reclaimed: stalled with no GPU activity")
+        return rec
+
     def _resume(self, req: LeaseRequest, now: datetime) -> LeaseRecord:
         """Re-attach running work under its old id: granted at once, whatever the book says (DESIGN.md, API)."""
         assert req.resume
@@ -396,7 +423,7 @@ class LeaseBook:
         if why is None and fits is False:
             why = "observe-only: granted without admission" if self.config.admission == "observe" else None
         rec.reason = why
-        rec.granted_at = now
+        rec.granted_at = rec.active_at = now
         # Until the first heartbeat a grant lives only FIRST_BEAT_S (or half its TTL, if longer, so a client that
         # beats every ttl/3 is never reclaimed early).
         rec.expires_at = now + timedelta(seconds=min(rec.ttl_s, max(FIRST_BEAT_S, rec.ttl_s / 2)))
@@ -627,9 +654,19 @@ class LeaseBook:
             rec.stage = stage
         if rec.state == "granted":
             self._beat(rec, now)
-        if (rec.peak_vram_mb, rec.progress, rec.stage) != shown and self._on_change is not None:
-            self._on_change(rec)  # the dashboard only; not _changed, which would wake a long poll for no state change
-        return HeartbeatReply(state=rec.state, ttl_s=rec.ttl_s, reason=rec.reason if rec.state != "granted" else None)
+        if (rec.peak_vram_mb, rec.progress, rec.stage) != shown:
+            if rec.state == "granted":
+                self._active(rec, now)  # the work reported something new: it is working
+            if self._on_change is not None:
+                self._on_change(rec)  # the dashboard only; not _changed, which would wake a long poll for nothing
+        return HeartbeatReply(
+            state=rec.state,
+            ttl_s=rec.ttl_s,
+            yield_requested=rec.yield_requested,
+            reason=YIELD_REASON
+            if rec.yield_requested and rec.state == "granted"
+            else (rec.reason if rec.state != "granted" else None),
+        )
 
     def _beat(self, rec: LeaseRecord, now: datetime) -> None:
         rec.heartbeats += 1
@@ -661,17 +698,75 @@ class LeaseBook:
             elif rec.state == "granted" and rec.expires_at and rec.expires_at <= now:
                 why = "no heartbeat since the grant" if rec.heartbeats == 0 else "no heartbeat within the TTL"
                 self._end(rec, "expired", now, reason=why)
+            elif rec.state == "granted":
+                self._watch(rec, now)
             elif not rec.active and rec.ended_at and (now - rec.ended_at).total_seconds() > RETAIN_S:
                 self._forget(rec)
+        for lid, when in list(self._reclaimed.items()):
+            if (now - when).total_seconds() > 24 * 3600:
+                del self._reclaimed[lid]
         self._serve_queue(now)
 
-    def _end(self, rec: LeaseRecord, state: LeaseState, now: datetime, *, reason: str | None = None) -> None:
+    # --- stalls --------------------------------------------------------------------------------------------------
+
+    def _working(self, rec: LeaseRecord, state: NodeState | None) -> bool:
+        """Does the node show GPU work under *rec* now? Its resident busy or just used; with none, any GPU load."""
+        if state is None or not state.reachable:
+            return True  # no view: never call a lease stalled on missing data
+        key = self._use_key(rec)
+        mine = [r for r in state.residents if self._resident_key(r) == key]
+        if mine:
+            return any(r.busy or (r.idle_s is not None and r.idle_s < RECENT_USE_S) for r in mine)
+        return bool(state.gpu and state.gpu.util_pct)
+
+    def _active(self, rec: LeaseRecord, now: datetime) -> None:
+        rec.active_at = now
+        if rec.stalled_at is not None:
+            rec.stalled_at, rec.yield_requested = None, False
+            log.info("lease_unstalled", lease=rec.lease_id, tenant=rec.tenant, kind=rec.kind, node=rec.node)
+            self._changed(rec)
+
+    def _blocking(self, rec: LeaseRecord) -> bool:
+        return any(o.state == "queued" and o.node == rec.node for o in self.leases.values())
+
+    def _watch(self, rec: LeaseRecord, now: datetime) -> None:
+        """Mark a granted lease stalled after ``lease_stall_s`` without GPU activity; ask it to yield, or reclaim it."""
+        limit = self.config.lease_stall_s
+        if limit is None or rec.node is None:
+            return
+        if self._working(rec, self._nodes().get(rec.node)):
+            self._active(rec, now)
+            return
+        quiet = (now - (rec.active_at or rec.granted_at or now)).total_seconds()
+        if quiet < limit:
+            return
+        if rec.stalled_at is None:
+            rec.stalled_at = now
+            log.warning(
+                "lease_stalled", lease=rec.lease_id, tenant=rec.tenant, kind=rec.kind, node=rec.node, quiet_s=quiet
+            )
+            self._changed(rec)
+        blocking = self._blocking(rec)
+        if blocking != rec.yield_requested:
+            rec.yield_requested = blocking
+            if blocking:
+                log.info("lease_yield_requested", lease=rec.lease_id, tenant=rec.tenant, node=rec.node)
+            self._changed(rec)
+        if blocking and self.config.lease_stall_reclaim and (now - rec.stalled_at).total_seconds() >= limit / 2:
+            self._reclaimed[rec.lease_id] = now
+            self._end(
+                rec, "refused", now, reason=f"reclaimed: no GPU activity for {int(quiet // 60)} min", how="reclaimed"
+            )
+
+    def _end(
+        self, rec: LeaseRecord, state: LeaseState, now: datetime, *, reason: str | None = None, how: str | None = None
+    ) -> None:
         if rec.state == "granted" and rec.node:
             self._last_used[(rec.node, self._use_key(rec))] = now
         rec.state, rec.ended_at, rec.expires_at = state, now, None
         if reason:
             rec.reason = reason
-        how = rec.outcome if state == "released" and rec.outcome else state
+        how = how or (rec.outcome if state == "released" and rec.outcome else state)
         self.ended[(rec.tenant, rec.kind, how)] += 1
         held = (now - rec.granted_at).total_seconds() if rec.granted_at else None
         log.info(

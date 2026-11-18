@@ -96,6 +96,13 @@ class BrokerConfig(BaseModel):
     # Resident ids (fnmatch patterns) admission never evicts, e.g. "dragon/ollama-dragon/hf.co/inclusionAI/SingGuard-*".
     # The policy file of rollout step 4 adds windows; this is the always-pinned part.
     pinned: list[str] = Field(default_factory=list)
+    # A granted lease that keeps heartbeating but shows no GPU activity this long (its resident never busy or used,
+    # no progress, stage or peak VRAM change) is marked stalled; while a queued lease waits on its node, its heartbeats
+    # ask it to yield. None: never. A keepalive loop that outlives its work otherwise holds the reservation forever.
+    lease_stall_s: float | None = Field(1800.0, gt=0)
+    # Also take the reservation back from a stalled lease that blocks a queued one (it ends refused, "reclaimed"),
+    # once it has ignored the yield for lease_stall_s / 2 more.
+    lease_stall_reclaim: bool = False
     # How often the residency policy (IRIS_POLICY: idle-kill, keepalive, restart) is acted on.
     residency_s: float = Field(15.0, gt=0)
 
