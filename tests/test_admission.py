@@ -339,3 +339,88 @@ def test_within_a_class_the_tenant_holding_fewest_grants_goes_first():
     assert [w.book.position(r) for r in (other, first)] == [0, 1]  # later, but holding nothing
     w.book.release(hog[0].lease_id, LeaseRelease())
     assert (other.state, first.state) == ("granted", "queued")
+
+
+# --- stalls: heartbeating, but no GPU work ----------------------------------------------------------------------
+
+
+def _hold(w: World, holder, seconds: float, *, waiter=None, beat=None) -> None:
+    """Advance *seconds*: the holder's keepalive beats and the waiter keeps polling, as live clients would."""
+    from argus_cortex.gpu_wire import Heartbeat
+
+    for _ in range(int(seconds // 20)):
+        w.now += timedelta(seconds=20)
+        w.book.heartbeat(holder.lease_id, beat or Heartbeat())
+        if waiter is not None and waiter.state == "queued":
+            w.ask(target=waiter.target, vram_mb=waiter.vram_mb, request_id=waiter.request_id)  # a poll
+        w.book.tick()
+
+
+def _stall_world(**over) -> tuple[World, object]:
+    w = World(config(lease_stall_s=600, **over))
+    w.nodes = {"dragon": node("dragon", 4000, [res("dragon", "ollama-dragon", 300, model="qwen3:8b")])}
+    holder = w.ask(target="ollama:qwen3:8b", vram_mb=4000, request_id="holder")
+    assert holder.state == "granted"
+    return w, holder
+
+
+def test_a_heartbeating_lease_with_no_gpu_work_is_marked_stalled():
+    w, holder = _stall_world()
+    _hold(w, holder, 580)
+    assert holder.stalled_at is None
+    _hold(w, holder, 40)
+    assert holder.state == "granted" and holder.stalled_at is not None
+    assert not holder.yield_requested  # nothing waits for the node: flag only
+
+
+def test_gpu_work_or_reported_progress_keeps_a_lease_from_stalling():
+    w, holder = _stall_world()
+    _hold(w, holder, 500)
+    w.nodes["dragon"].residents[0].busy = True
+    w.book.tick()
+    w.nodes["dragon"].residents[0].busy = False
+    _hold(w, holder, 500)
+    assert holder.stalled_at is None  # the busy tick reset the clock
+    from types import SimpleNamespace
+
+    for i in range(3):  # a CPU-bound phase that reports progress is working too
+        _hold(w, holder, 300, beat=SimpleNamespace(peak_vram_mb=None, progress=i / 3, stage=None))
+    assert holder.stalled_at is None
+
+
+def test_a_stall_unflags_when_work_shows_up():
+    w, holder = _stall_world()
+    _hold(w, holder, 620)
+    assert holder.stalled_at is not None
+    w.nodes["dragon"].residents[0].idle_s = 5
+    w.book.tick()
+    assert holder.stalled_at is None and holder.active_at == w.now
+
+
+def test_a_stalled_lease_blocking_the_queue_is_asked_to_yield():
+    from argus_cortex.gpu_wire import Heartbeat
+
+    w, holder = _stall_world()
+    waiter = w.ask(target="ollama:other", vram_mb=3000, request_id="waiter", constraints=GpuConstraints(node="dragon"))
+    assert waiter.state == "queued"
+    _hold(w, holder, 620, waiter=waiter)
+    reply = w.book.heartbeat(holder.lease_id, Heartbeat())
+    assert reply.state == "granted" and reply.yield_requested and "stalled" in reply.reason
+    _hold(w, holder, 3600, waiter=waiter)
+    assert holder.state == "granted"  # without lease_stall_reclaim it is only asked
+
+
+def test_reclaim_ends_a_stalled_blocker_and_its_resume_stays_refused():
+    w, holder = _stall_world(lease_stall_reclaim=True)
+    waiter = w.ask(target="ollama:other", vram_mb=3000, request_id="waiter", constraints=GpuConstraints(node="dragon"))
+    _hold(w, holder, 620, waiter=waiter)
+    assert holder.state == "granted" and holder.yield_requested
+    _hold(w, holder, 300, waiter=waiter)
+    assert (holder.state, waiter.state) == ("refused", "granted")
+    assert holder.reason.startswith("reclaimed") and w.book.ended[("agent-composer", "default", "reclaimed")] == 1
+    # The keepalive's next beat sees the refusal (not a 404), and a resume does not re-grant it.
+    from argus_cortex.gpu_wire import Heartbeat
+
+    assert w.book.heartbeat(holder.lease_id, Heartbeat()).state == "refused"
+    again = w.book.request(LeaseRequest(tenant="agent-composer", target="ollama:qwen3:8b", resume=holder.lease_id))
+    assert again.state == "refused"

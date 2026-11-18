@@ -102,6 +102,12 @@ class _BrokerCollector:
             "Granted leases that admission would not have granted (observe-only)",
             labels=["node", "tenant", "kind"],
         )
+        stalled = GaugeMetricFamily(
+            "iris_leases_stalled",
+            "Granted leases still heartbeating with no GPU activity for lease_stall_s",
+            labels=["node", "tenant", "kind"],
+        )
+        stuck: dict[tuple[str, ...], int] = {}
         count: dict[tuple[str, ...], int] = {}
         mb: dict[tuple[str, ...], int] = {}
         over: dict[tuple[str, ...], int] = {}
@@ -111,14 +117,18 @@ class _BrokerCollector:
             mb[key] = mb.get(key, 0) + rec.vram_mb
             if rec.fits is False:
                 over[key[:3]] = over.get(key[:3], 0) + 1
+            if rec.stalled_at is not None:
+                stuck[key[:3]] = stuck.get(key[:3], 0) + 1
         for key, n in count.items():
             leases.add_metric(list(key), n)
             lease_mb.add_metric(list(key), mb[key])
         for key, n in over.items():
             unfit.add_metric(list(key), n)
+        for key, n in stuck.items():
+            stalled.add_metric(list(key), n)
         ended = CounterMetricFamily(
             "iris_leases_ended",
-            "Leases ended, by how: ok, failed, oom, cancelled, expired, refused",
+            "Leases ended, by how: ok, failed, oom, cancelled, expired, refused, reclaimed",
             labels=["tenant", "kind", "how"],
         )
         for (tenant, kind, how), n in self.broker.leases.ended.items():
@@ -140,7 +150,7 @@ class _BrokerCollector:
         tenants = GaugeMetricFamily("iris_tenants", "Tenants that registered a manifest")
         tenants.add_metric([], len(self.broker.leases.tenants))
         yield from (up, total, free, admissible, unattributed, ram, rvram, ridle, svc_up, queue)
-        yield from (leases, lease_mb, unfit, ended, evictions, residency, tenants)
+        yield from (leases, lease_mb, unfit, stalled, ended, evictions, residency, tenants)
 
 
 def create_app(

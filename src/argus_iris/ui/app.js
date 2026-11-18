@@ -276,7 +276,13 @@ function renderLeases(name) {
     const from = l.granted_at ?? l.created_at;
     // fits=false: admission would have refused it. Observe-only grants it anyway; the row says so.
     const over = l.fits === false;
-    const st = l.state === "queued" ? "queued" : over ? "granted · over" : "granted";
+    // stalled_at: heartbeating, yet no GPU work under the lease for lease_stall_s (a keepalive that outlived its job).
+    const stalled = l.state === "granted" && l.stalled_at;
+    const st = l.state === "queued" ? "queued" : stalled ? "granted · stalled" : over ? "granted · over" : "granted";
+    const stall = stalled
+      ? [`no GPU activity for ${dur(since(l.active_at ?? l.granted_at))}`, l.yield_requested && "asked to yield"]
+        .filter(Boolean).join(" · ")
+      : null;
     const why = [l.reason, l.caller && `caller ${l.caller}`, l.admissible_mb != null && `${gb(l.admissible_mb)} admissible at grant`]
       .filter(Boolean).join(" · ");
     // Size: weights the service keeps after the lease vs the working set held only while it runs, and what the
@@ -292,7 +298,8 @@ function renderLeases(name) {
         split || peak ? el("span", { class: "sub", text: [split, peak].filter(Boolean).join(" · ") }) : null),
       el("td", { class: "num", "data-idle": since(from) ?? "", "data-at": Date.now(), text: dur(since(from)) }),
       progressCell(l),
-      el("td", { class: `state ${over ? "busy" : ""}`, title: why || null }, st,
+      el("td", { class: `state ${over || stalled ? "busy" : ""}`, title: why || null }, st,
+        stall ? el("span", { class: "svc-err", text: stall }) : null,
         // A queued lease says what it waits for (evicting X, waiting for N MB): the point of looking at the queue.
         l.state === "queued" && l.reason ? el("span", { class: "svc-err", text: l.reason }) : null));
   }) : [el("tr", {}, el("td", { colSpan: 7, class: "none", text: "no leases" }))]));
