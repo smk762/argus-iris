@@ -12,5 +12,7 @@ src/argus_iris/_version.py
 # Local secrets (see deploy/.env.example)
 .env
 deploy/iris.yaml
+deploy/policy.yaml
 .env.*
 !.env.example
+deploy/*.bak-*

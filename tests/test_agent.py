@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import httpx
@@ -7,9 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from argus_iris.agent.app import Agent, AgentSettings, create_app
-from argus_iris.agent.docker import DockerClient
+from argus_iris.agent.docker import DockerClient, DockerError
 from argus_iris.agent.nvml import RawProcess, Sample
-from argus_iris.models import GpuInfo
+from argus_iris.models import ContainerAction, GpuInfo
 
 COMFY_ID = "a" * 64
 COMFY_SCOPE = f"/system.slice/docker-{COMFY_ID}.scope"
@@ -148,3 +149,34 @@ def test_actions_disabled_without_token(host) -> None:
         r = client.post("/containers/voluptas_comfyui/start", headers={"Authorization": "Bearer anything"})
         assert r.status_code == 403
         assert "IRIS_AGENT_TOKEN" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("ref", ["x/../../images/prune?", "x/../../containers/create?", "a#b", "../etc", "", "-x"])
+async def test_docker_client_rejects_refs_outside_name_grammar(ref) -> None:
+    docker = FakeDocker()
+    client = DockerClient(transport=httpx.MockTransport(docker.handler))
+    with pytest.raises(DockerError, match="not a container name"):
+        await client.inspect(ref)
+    with pytest.raises(DockerError, match="not a container name"):
+        await client.act(ref, ContainerAction.STOP)
+    assert docker.calls == []  # nothing reached the socket
+
+
+async def test_docker_error_clears_once_docker_recovers(host) -> None:
+    docker = FakeDocker()
+    agent = make_agent(host, docker)
+    # "sidecar" is allow-listed but not on the GPU, so every poll inspects it in the allowlist loop.
+    agent.settings = dataclasses.replace(agent.settings, containers=frozenset({"voluptas_comfyui", "sidecar"}))
+    await agent.poll_once()  # caches the GPU container's ID
+    assert agent.docker_error is None
+
+    down = True
+    agent.docker = DockerClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(500) if down else docker.handler(r))
+    )
+    await agent.poll_once()
+    assert agent.docker_error and "HTTP 500" in agent.docker_error
+
+    down = False
+    await agent.poll_once()
+    assert agent.docker_error is None

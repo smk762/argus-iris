@@ -1,12 +1,13 @@
-// iris dashboard: a thin client over the broker's own API. /events sends every node's state on connect and again on
-// each change, so the page needs no polling. The broker decides; this page only shows (and asks for a warm).
+// iris dashboard: a thin client over the broker's own API. /events sends every node's state and every active lease on
+// connect and again on each change, so the page needs no polling. The broker decides; this page only shows (and asks for a warm).
 
 const api = (path) => new URL(`../${path}`, location.href);
 const $ = (sel, root = document) => root.querySelector(sel);
 const TOKEN_KEY = "iris-broker-token";
-const SLOTS = 8; // dh categorical slots; a 9th service on a node folds into "other"
+const SLOTS = 8; // dh categorical slots: 1-7 name a service, the last is "other", where an 8th service folds
 
 const nodes = new Map(); // name -> NodeState (latest)
+const leases = new Map(); // lease_id -> LeaseRecord, queued or granted only
 const order = []; // node names in config order
 const colours = new Map(); // node -> Map(service -> slot), grows only: colour follows the service, never its rank
 let config = null;
@@ -41,10 +42,10 @@ function el(tag, props = {}, ...kids) {
 function slotFor(node, service) {
   let m = colours.get(node);
   if (!m) colours.set(node, (m = new Map()));
-  if (!m.has(service)) m.set(service, m.size < SLOTS ? m.size + 1 : 0);
+  if (!m.has(service)) m.set(service, m.size < SLOTS - 1 ? m.size + 1 : 0);
   return m.get(service);
 }
-const colourVar = (slot) => (slot ? `var(--dh-cat-${slot})` : "var(--dh-cat-8)");
+const colourVar = (slot) => `var(--dh-cat-${slot || SLOTS})`; // slot 0 ("other") alone gets the last colour
 function seedColours(state) {
   // Configured services first, in config order, so a service keeps its colour whether or not it is loaded.
   for (const s of config?.services ?? []) if (s.node === state.name) slotFor(state.name, s.id);
@@ -144,15 +145,45 @@ function renderResidents(node, state) {
     if (modelState && modelState !== "loaded") st = modelState;
     const left = r.expires_at ? -since(r.expires_at) : null;
     const exp = left == null ? "" : left > 365 * 86400 ? " · pinned" : ` · expires ${dur(left)}`;
+    const pol = policyText(r.policy);
     return el("tr", {},
       el("td", {}, el("span", { class: "sw", style: { "--c": colourVar(slot) }, "aria-hidden": "true" }), r.service),
       el("td", { text: r.model ?? "–" }),
       el("td", { class: "meta", text: r.source }),
       el("td", { class: "num", text: gb(r.vram_mb) }),
       el("td", { class: "num", "data-idle": idle ?? "", "data-at": Date.now(), text: dur(idle) }),
-      el("td", { class: `state ${r.busy ? "busy" : ""}`, text: st + exp }));
-  }) : [el("tr", {}, el("td", { colSpan: 6, class: "none", text: "nothing resident" }))]));
+      el("td", { class: `state ${r.busy ? "busy" : ""}`, title: r.policy?.note ?? null }, st + exp,
+        pol ? el("span", { class: `svc-err ${r.policy.enforce ? "" : "would"}`, text: pol }) : null),
+      evictCell(r));
+  }) : [el("tr", {}, el("td", { colSpan: 7, class: "none", text: "nothing resident" }))]));
 }
+
+// What the residency policy says: pinned, when idle-kill is due, what iris does next ("would" while not enforced).
+function policyText(p) {
+  if (!p) return null;
+  if (p.pinned) return p.enforce || !p.next ? "policy: pinned" : "policy: pinned (would set keep_alive -1)";
+  const verb = { evict: "idle-kill", unload: "unload from CPU", restart: "restart", extend: "extend keep_alive", pin: "pin" }[p.next];
+  if (verb) return p.enforce ? `policy: ${verb} now` : `policy: would ${verb}`;
+  if (p.due_in_s != null) return `policy: idle-kill in ${dur(p.due_in_s)}${p.enforce ? "" : " (report-only)"}`;
+  return p.note ? `policy: ${p.note}` : null;
+}
+
+// Residents iris can evict: those read through an adapter, while they hold VRAM. Observed processes have none.
+function evictCell(r) {
+  const cell = el("td", {});
+  const freed = ["unloaded", "cpu"].includes(r.detail?.model_state);
+  if (r.source === "process" || freed) return cell;
+  const btn = el("button", { type: "button", class: "btn ghost", text: "Evict", disabled: r.busy,
+    title: r.busy ? "busy: iris never interrupts work" : "free its VRAM (to CPU where the service can, else unload)" });
+  btn.addEventListener("click", () => runAction(`residents/${r.id.split("/").map(encodeURIComponent).join("/")}/evict`, r.id,
+    btn, cell, "Evict", "Evicting…", evictSummary));
+  cell.append(btn);
+  const prev = lastResult.get(r.id);
+  if (prev) cell.append(prev.cloneNode(true));
+  return cell;
+}
+const evictSummary = (b) => `${b.action === "evict" ? "moved to CPU" : "unloaded"}: ${gb(b.before_mb - b.after_mb)} freed`
+  + (b.residual_mb ? `, ${gb(b.residual_mb)} still held (restart frees it)` : "") + (b.confirmed ? "" : " (not confirmed)");
 
 function renderServices(node, state) {
   const tbody = $("table.services tbody", node);
@@ -166,7 +197,7 @@ function renderServices(node, state) {
     const act = el("td", {});
     if (canWarm) {
       const btn = el("button", { type: "button", class: "btn ghost", text: "Warm", title: warmHint(c) });
-      btn.addEventListener("click", () => warm(s.id, btn, act));
+      btn.addEventListener("click", () => runAction(`services/${encodeURIComponent(s.id)}/warm`, s.id, btn, act, "Warm", "Warming…", warmSummary));
       act.append(btn);
       const prev = lastResult.get(s.id);
       if (prev) act.append(prev.cloneNode(true));
@@ -216,6 +247,62 @@ function renderNode(state) {
   renderBar(node, state);
   renderResidents(node, state);
   renderServices(node, state);
+  renderLeases(state.name);
+}
+
+// Progress is what the caller reports with its heartbeat (cortex GpuLease.report_progress); the broker only relays it.
+function progressCell(l) {
+  if (l.state !== "granted" || (l.progress == null && !l.stage)) return el("td", { class: "meta", text: "–" });
+  const p = l.progress;
+  const elapsed = since(l.granted_at);
+  // Linear ETA from the grant: rough, and only once there is enough done to extrapolate from.
+  const left = p != null && p >= 0.05 && p < 1 && elapsed != null ? (elapsed * (1 - p)) / p : null;
+  const label = [p != null ? `${Math.round(p * 100)}%` : null, left != null ? `~${dur(left)} left` : null]
+    .filter(Boolean).join(" · ");
+  return el("td", { class: "progress-cell" },
+    p != null ? el("div", { class: "progress", role: "progressbar", "aria-valuemin": 0, "aria-valuemax": 100,
+      "aria-valuenow": Math.round(p * 100), "aria-label": `${l.tenant} progress` },
+      el("div", { class: "fill", style: { width: `${(p * 100).toFixed(1)}%` } })) : null,
+    label ? el("span", { class: "sub", text: label }) : null,
+    l.stage ? el("span", { class: "svc-err", text: l.stage, title: l.stage }) : null);
+}
+
+function renderLeases(name) {
+  const node = document.getElementById(`node-${name}`);
+  if (!node) return;
+  const rows = [...leases.values()].filter((l) => l.node === name)
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+  $("table.leases tbody", node).replaceChildren(...(rows.length ? rows.map((l) => {
+    const from = l.granted_at ?? l.created_at;
+    // fits=false: admission would have refused it. Observe-only grants it anyway; the row says so.
+    const over = l.fits === false;
+    // stalled_at: heartbeating, yet no GPU work under the lease for lease_stall_s (a keepalive that outlived its job).
+    const stalled = l.state === "granted" && l.stalled_at;
+    const st = l.state === "queued" ? "queued" : stalled ? "granted · stalled" : over ? "granted · over" : "granted";
+    const stall = stalled
+      ? [`no GPU activity for ${dur(since(l.active_at ?? l.granted_at))}`, l.yield_requested && "asked to yield"]
+        .filter(Boolean).join(" · ")
+      : null;
+    const why = [l.reason, l.caller && `caller ${l.caller}`, l.admissible_mb != null && `${gb(l.admissible_mb)} admissible at grant`]
+      .filter(Boolean).join(" · ");
+    // Size: weights the service keeps after the lease vs the working set held only while it runs, and what the
+    // caller says it really peaked at (heartbeats), so a manifest that over- or under-asks shows.
+    const split = l.model_mb ? `${gb(l.model_mb)} model · ${gb(l.vram_mb - l.model_mb)} work` : null;
+    const peak = l.peak_vram_mb != null ? `peak ${gb(l.peak_vram_mb)}` : null;
+    return el("tr", {},
+      el("td", {}, `${l.tenant} · `, el("span", { class: "meta", text: l.kind }),
+        l.caller ? el("span", { class: "svc-err", text: l.caller, title: l.caller }) : null),
+      el("td", { text: l.target }),
+      el("td", { class: "meta", text: l.priority + (l.preemptible ? " · preemptible" : "") }),
+      el("td", { class: "num" }, l.vram_mb ? gb(l.vram_mb) : "–",
+        split || peak ? el("span", { class: "sub", text: [split, peak].filter(Boolean).join(" · ") }) : null),
+      el("td", { class: "num", "data-idle": since(from) ?? "", "data-at": Date.now(), text: dur(since(from)) }),
+      progressCell(l),
+      el("td", { class: `state ${over || stalled ? "busy" : ""}`, title: why || null }, st,
+        stall ? el("span", { class: "svc-err", text: stall }) : null,
+        // A queued lease says what it waits for (evicting X, waiting for N MB): the point of looking at the queue.
+        l.state === "queued" && l.reason ? el("span", { class: "svc-err", text: l.reason }) : null));
+  }) : [el("tr", {}, el("td", { colSpan: 7, class: "none", text: "no leases" }))]));
 }
 
 function placeNode(node, name) {
@@ -246,32 +333,28 @@ setInterval(() => {
 }, 1000);
 
 // ---------- warm ----------
-const lastResult = new Map(); // service -> result element (kept across re-renders)
-async function warm(id, btn, cell) {
+const lastResult = new Map(); // service or resident id -> result element (kept across re-renders)
+const warmSummary = (b) => (b.up ? "" : "still down: ")
+  + (b.detail ?? [b.started_container && "container started", b.warmed && "warmed", `up after ${b.waited_s.toFixed(1)}s`].filter(Boolean).join(", "));
+async function runAction(path, key, btn, cell, label, busyLabel, summary) {
   let token = sessionStorage.getItem(TOKEN_KEY);
   if (!token) token = await askToken();
   if (!token) return;
   btn.disabled = true;
-  btn.textContent = "Warming…";
+  btn.textContent = busyLabel;
   let msg;
   try {
-    const res = await fetch(api(`services/${encodeURIComponent(id)}/warm`), {
-      method: "POST", headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await fetch(api(path), { method: "POST", headers: { Authorization: `Bearer ${token}` } });
     const body = await res.json().catch(() => ({}));
     if (res.status === 401) sessionStorage.removeItem(TOKEN_KEY);
-    if (res.ok) {
-      const bits = [body.started_container && "container started", body.warmed && "warmed", `up after ${body.waited_s.toFixed(1)}s`];
-      msg = el("span", { class: `result ${body.up ? "ok" : "err"}`, text: (body.up ? "" : "still down: ") + (body.detail ?? bits.filter(Boolean).join(", ")) });
-    } else {
-      msg = el("span", { class: "result err", text: `${res.status}: ${body.detail ?? res.statusText}` });
-    }
+    const ok = res.ok && body.up !== false && body.confirmed !== false;
+    msg = el("span", { class: `result ${ok ? "ok" : "err"}`, text: res.ok ? summary(body) : `${res.status}: ${body.detail ?? res.statusText}` });
   } catch (e) {
     msg = el("span", { class: "result err", text: String(e) });
   }
-  lastResult.set(id, msg);
+  lastResult.set(key, msg);
   btn.disabled = false;
-  btn.textContent = "Warm";
+  btn.textContent = label;
   cell.querySelector(".result")?.remove();
   cell.append(msg.cloneNode(true));
 }
@@ -331,7 +414,21 @@ async function boot() {
   const live = $("#live");
   const setLive = (state, text) => { live.dataset.state = state; live.lastElementChild.textContent = text; };
   const es = new EventSource(api("events"));
-  es.addEventListener("open", () => setLive("ok", "live"));
+  es.addEventListener("open", () => {
+    setLive("ok", "live");
+    // The stream resends every active lease on connect; drop what we had so leases that ended meanwhile go.
+    const had = new Set([...leases.values()].map((l) => l.node));
+    leases.clear();
+    for (const name of had) if (name) renderLeases(name);
+  });
+  es.addEventListener("lease", (e) => {
+    const l = JSON.parse(e.data);
+    const was = leases.get(l.lease_id);
+    if (l.state === "queued" || l.state === "granted") leases.set(l.lease_id, l);
+    else leases.delete(l.lease_id);
+    if (was?.node && was.node !== l.node) renderLeases(was.node);
+    if (l.node) renderLeases(l.node);
+  });
   es.addEventListener("error", () => setLive(es.readyState === EventSource.CLOSED ? "bad" : "warn", "reconnecting"));
   es.addEventListener("node", (e) => {
     const state = JSON.parse(e.data);

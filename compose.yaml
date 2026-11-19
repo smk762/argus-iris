@@ -1,0 +1,18 @@
+# argus-iris: the broker (:8120) and this host's node agent (:9110), one image for both.
+# The services are defined once, in deploy/; this file includes them with deploy/.env.
+#
+#   cp deploy/.env.example deploy/.env            # then edit; see the comments there
+#   docker compose up -d                          # broker + agent (morpheus)
+#   docker compose up -d iris-agent               # agent only (dragon, jarrah)
+#   docker compose build                          # ghcr.io/smk762/argus-iris:${IRIS_TAG}, from this checkout
+#
+# deploy/broker.compose.yaml and deploy/agent.compose.yaml still work on their own with -f.
+# Reaching either port is host access (the agent holds the Docker socket): keep HOST_IP on the LAN.
+
+name: argus-iris
+
+include:
+  - path: deploy/broker.compose.yaml
+    env_file: deploy/.env
+  - path: deploy/agent.compose.yaml
+    env_file: deploy/.env

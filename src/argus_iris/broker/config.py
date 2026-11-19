@@ -50,6 +50,9 @@ class ServiceConfig(BaseModel):
     unload_path: RoutePath | None = "/admin/unload"
     evict_path: RoutePath | None = None
     warm_path: RoutePath | None = None
+    # VRAM the service takes once warm. A manual warm is refused while the node cannot admit it; unset, iris uses the
+    # most it has seen the service hold since the broker started.
+    warm_mb: int | None = Field(default=None, ge=0)
     # Name of an environment variable holding a bearer token sent on every request to this service (rag-chat's
     # resident gateway needs one even for reads; ARGUS_ADMIN_TOKEN guards /admin/*). Never the token itself.
     token_env: str | None = None
@@ -79,6 +82,29 @@ class BrokerConfig(BaseModel):
     agent_token_env: str = "IRIS_AGENT_TOKEN"
     # How long a warm waits for a started service to answer its health check.
     warm_timeout_s: float = Field(180.0, gt=0, le=900)
+    # How long an evict waits to see the memory come back on the agent's NVML view.
+    evict_confirm_s: float = Field(30.0, gt=0, le=300)
+    # Admission: "observe" grants every lease at once and records whether it would have fit; "enforce" queues leases
+    # that do not fit, spills to the next candidate node, and evicts idle residents to make room (DESIGN.md).
+    admission: Literal["observe", "enforce"] = "observe"
+    # A resident must have been idle this long before admission evicts it (so a model is not evicted between two
+    # requests of one conversation).
+    admission_min_idle_s: float = Field(60.0, ge=0)
+    # A resident of the request's own class is evicted only once it has been idle, and loaded, this long: so two
+    # tenants of one class cannot ping-pong a card between their models.
+    admission_same_class_idle_s: float = Field(300.0, ge=0)
+    # Resident ids (fnmatch patterns) admission never evicts, e.g. "dragon/ollama-dragon/hf.co/inclusionAI/SingGuard-*".
+    # The policy file of rollout step 4 adds windows; this is the always-pinned part.
+    pinned: list[str] = Field(default_factory=list)
+    # A granted lease that keeps heartbeating but shows no GPU activity this long (its resident never busy or used,
+    # no progress, stage or peak VRAM change) is marked stalled; while a queued lease waits on its node, its heartbeats
+    # ask it to yield. None: never. A keepalive loop that outlives its work otherwise holds the reservation forever.
+    lease_stall_s: float | None = Field(1800.0, gt=0)
+    # Also take the reservation back from a stalled lease that blocks a queued one (it ends refused, "reclaimed"),
+    # once it has ignored the yield for lease_stall_s / 2 more.
+    lease_stall_reclaim: bool = False
+    # How often the residency policy (IRIS_POLICY: idle-kill, keepalive, restart) is acted on.
+    residency_s: float = Field(15.0, gt=0)
 
     @model_validator(mode="after")
     def _check(self) -> BrokerConfig:

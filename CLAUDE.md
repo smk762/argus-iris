@@ -22,7 +22,8 @@ Not checked out? Read https://github.com/smk762/argus-cortex/blob/dev/SUITE.md
 
 ## Layout
 
-`src/argus_iris/` — the package. Rollout step 2 (observe-only): nothing admits, evicts or warms yet.
+`src/argus_iris/` — the package. Rollout step 3: leases, placement and admission (`admission: observe` grants
+everything and records `fits`; `enforce` queues, spills and evicts). Step 4's residency policy (`policy.py`, `residency.py`) is report-only per rule until `enforce: true`.
 
 - `models.py` — agent snapshot (`NodeSnapshot`, `GpuProcess`, …) and the broker's read models (`NodeState`,
   `Resident`, `NodeLedger`). Lease and tenant-manifest models are **not** here: import them from
@@ -32,18 +33,34 @@ Not checked out? Read https://github.com/smk762/argus-cortex/blob/dev/SUITE.md
   memory, `docker.py` is a minimal Engine API client over the Unix socket, `app.py` serves `/snapshot`, `/metrics`,
   `/health` and token- and allowlist-gated `POST /containers/{name}/{start|stop|restart}`.
 - `broker/` — `config.py` (YAML, `IRIS_CONFIG`), `adapters/` (comfyui, ollama, argus-http; read-only),
-  `state.py` (`Broker` polls agents and adapters; `compose_node` is the pure accounting), `actions.py` (manual
-  warm: agent starts the container, wait for health, call `warm_path`).
+  argus-http validates `/health` as cortex's `ResidentHealth` and reads older shapes best-effort, logging
+  `resident_off_contract` (and `detail.off_contract` on the resident); a truthy non-bool `busy` counts as busy,
+  `state.py` (`Broker` polls agents and adapters, ticks the lease book every second; `compose_node` is the pure
+  accounting), `leases.py` (`LeaseBook`: tenants, `candidates()` (placement order), admission (`_serve_queue`: class order
+  with aging, head reservation, spill, `_plan` eviction plans run by the broker's `_evict_for`), request_id idempotency, `resume`,
+  heartbeat/TTL expiry (a beat also carries `progress`/`stage`, published to `/events` when they change), the 30 s first-beat reclaim, the stall watchdog (`_watch`: heartbeating with no GPU activity for `lease_stall_s` -> `stalled_at`, `yield_requested` while it blocks the queue, reclaimed as `refused` only with `lease_stall_reclaim`), unpolled-queue drop; synchronous with an injectable clock, so test
+  it by moving the clock and calling `tick()`), `policy.py` (the operator's YAML: cron, windows, resident rules; `IRIS_POLICY`), `residency.py` (`Residency`:
+  per-resident `ResidentPolicy` view on every poll, `step()` acts on enforced rules: pin/extend Ollama keep_alive,
+  idle-kill evict, `unload_after` (CPU stage -> unloaded; confirmed by the reply, since only RAM moves), restart
+  when unloaded (never merely on the CPU) but holding `restart_residual_mb`, or idle `restart_host_ram_idle` with
+  container anon memory (`Resident.host_ram_mb`) over `restart_host_ram_mb` (default: the manifest's
+  `host_ram_restart_mb`); `Broker.residuals` remembers what an
+  eviction left so it is not repeated), `actions.py` (warm: 409 unless `force` while the node cannot admit `warm_mb` or the most it was seen holding, `Broker.peaks`; agent starts the container, wait for health, call `warm_path`;
+  `evict_resident`: adapter route per source, 409 while busy, confirmed by the GPU's NVML free memory rising by half
+  the resident's VRAM, not by the service's word; reports `residual_mb`).
 - `server/app.py` — the broker API (`[server]` extra, `argus-iris serve`, :8120): `/nodes`, `/residents`, `/events`
-  (SSE), `/metrics`, `/health`, `/ui/`, and `POST /services/{id}/warm` (needs `ARGUS_GPU_BROKER_TOKEN`). Wrapped in cortex's
-  `WriteGuard`.
+  (SSE: `node` and `lease` events), `/metrics`, `/health`, `/ui/`, the lease routes (`POST /tenants`, `POST /leases`,
+  `GET /leases/{id}?wait_s=`, `.../heartbeat`, `.../release`, `GET /leases`, `/queue`, `/tenants`; bearer token
+  checked only when `ARGUS_GPU_BROKER_TOKEN` is set) `POST /services/{id}/warm` and `POST /residents/{id}/evict` (resident ids contain slashes; both need that token). Wrapped in
+  cortex's `WriteGuard`. Test the lease routes with cortex's own `BrokerCoordinator` over `httpx.ASGITransport`.
 - `ui/` — the dashboard, served by the broker at `/ui/` (`/` redirects). Plain HTML and ES modules with no build
   step, shipped in the wheel (the pattern argus-mask and argus-survey use). It is a thin client over `/health`,
   `/config` and `/events`, and the warm POST, so it never computes what the broker decides. `vendor/dh/` holds
   `dh-tokens.css` and `dh-theme.js`, copied unchanged from dh-shared 1.2.7 (via argus-mask): **never edit them**.
   Re-copy them from a newer sync instead. Colours come from `--dh-*` tokens only.
 - `cli.py` — Typer app; entry point `argus-iris` (`serve`, `agent`, `version`).
-- `deploy/` — example broker config and compose files for the broker and the agents.
+- `compose.yaml` includes `deploy/broker.compose.yaml` and `deploy/agent.compose.yaml` with `deploy/.env` (project
+  `argus-iris`); `deploy/` — example broker config, policy, and the compose files for the broker and the agents.
 
 ## Commands
 
@@ -68,6 +85,15 @@ Run one test: `uv run --no-sync pytest tests/test_x.py::test_name -q`.
 - **Memory is MiB** everywhere (`*_mb`), times are aware UTC.
 - **Don't 4xx for "busy"** on lease routes: cortex's client treats any 4xx other than 404 as a caller error. Busy is
   `queued`.
+
+## Branches
+
+`dev` is the default branch and the base for every PR, as in the rest of the suite. Cut feature branches from
+`origin/dev` and bring them up to date by merging `origin/dev`, never `main`. Never push work to `main` or open a PR
+against it, except the release PR from `dev`: `main` must never be ahead of `dev`. A release fast-forwards `main` to a
+`dev` commit that passed CI (`git push origin origin/dev:main`), then tags `vX.Y.Z` on it. If `main` is protected, the
+release is a reviewed PR from `dev` into `main`; its merge commit is the one thing `main` may have that `dev` lacks
+(same tree). Leave it there and don't merge `main` back into `dev`.
 
 ## CI / release
 

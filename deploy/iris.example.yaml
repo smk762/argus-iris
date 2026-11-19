@@ -31,7 +31,7 @@ services:
     node: jarrah
     adapter: ollama
     base_url: http://jarrah:11434
-    container: ollama
+    container: mithrandir-ollama   # jarrah's Ollama runs in mithrandir's (Immich) compose project
   # voluptas (smk762/voluptas#22): /health carries model_state, busy, idle_s; /admin/unload and /admin/wake.
   - id: image-gen-diffusers
     node: morpheus
@@ -46,6 +46,7 @@ services:
     base_url: http://morpheus:8034
     container: voluptas_miso
     warm_path: /admin/wake
+    token_env: ARGUS_ADMIN_TOKEN      # voluptas#35: miso's /admin/* honours it (admin_auth: true)
 
   # agent-composer (smk762/agent-composer#44): the sidecars listen on loopback, so iris reaches them through
   # rag-chat's resident gateway, which needs an API key as Bearer even for reads. Each sidecar's /health has a
@@ -60,6 +61,17 @@ services:
       base_url: "http://dragon:9150/api/runtime/residents/modernbert", token_env: RAG_CHAT_API_KEY }
   - { id: infinity, node: dragon, adapter: argus-http, container: infinity, warm_path: /admin/wake,
       base_url: "http://dragon:9150/api/runtime/residents/infinity", token_env: RAG_CHAT_API_KEY }
+
+# Admission. "observe" (the default) grants every lease at once and records whether it would have fit; "enforce"
+# queues what does not fit, spills to the next node (ollama-dragon, then ollama-jarrah), and evicts idle residents
+# (least recently used, never busy or pinned) to make room. Watch iris_leases_over_admissible in observe first.
+admission: observe
+admission_min_idle_s: 60          # before a lower-class resident is evicted
+admission_same_class_idle_s: 300  # idle and loaded this long before a same-class one is (no ping-pong)
+lease_stall_s: 1800              # granted, heartbeating, no GPU activity this long: stalled (asked to yield if blocking)
+lease_stall_reclaim: false       # true: also end a stalled lease that blocks the queue, after lease_stall_s / 2 more
+pinned:                       # resident ids (fnmatch) admission never evicts
+  - "dragon/ollama-dragon/hf.co/inclusionAI/SingGuard-*"
 
 # Browser origins (the Studio page) allowed to make state-changing requests.
 trusted_origins: []

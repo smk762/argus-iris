@@ -3,6 +3,7 @@
 services:
   argus-iris:
     image: ghcr.io/smk762/argus-iris:${IRIS_TAG:-latest}
+    build: ..                     # `docker compose build`: the repo root (hatch-vcs needs its .git)
     container_name: argus-iris
     command: ["argus-iris", "serve"]
     restart: unless-stopped
@@ -10,8 +11,11 @@ services:
       - "${HOST_IP:-0.0.0.0}:8120:8120"
     volumes:
       - ${IRIS_CONFIG_FILE:-./iris.yaml}:/etc/argus-iris/iris.yaml:ro
+      # Residency policy. The default is the shipped example, which only reports (no rule enforces).
+      - ${IRIS_POLICY_FILE:-./policy.example.yaml}:/etc/argus-iris/policy.yaml:ro
     environment:
       IRIS_CONFIG: /etc/argus-iris/iris.yaml
+      IRIS_POLICY: /etc/argus-iris/policy.yaml
       # Callers' token (what argus-cortex's client sends). Manual actions such as warm are disabled while unset.
       ARGUS_GPU_BROKER_TOKEN: ${ARGUS_GPU_BROKER_TOKEN:-}
       # Sent to the agents for container actions; must match each agent's IRIS_AGENT_TOKEN.

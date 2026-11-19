@@ -196,6 +196,13 @@ that ignores it is not killed, but from the first `yield_requested` iris stops e
 - A queued request stays queued only while its client is polling it (`GET /leases/{id}?wait_s=`). One with no poll for
   about 2 × `wait_s` is dropped, not granted.
 - A grant that receives no first heartbeat within 30 s is reclaimed.
+- A heartbeat proves the client is alive, not that it works. A grant with no GPU activity for `lease_stall_s` (30 min;
+  its resident never busy or used in the last minute, no change in `progress`, `stage` or `peak_vram_mb`; for a
+  target with no resident, GPU utilisation on the node) is marked stalled. While a queued lease waits on its node,
+  its heartbeat replies set `yield_requested`. With `lease_stall_reclaim` it is ended `refused` ("reclaimed") once it
+  has ignored that for `lease_stall_s / 2`, and a `resume` of it stays refused, so a keepalive loop that outlived its
+  job cannot hold the reservation (2026-11-18: a 17 GB proof-eval lease beat for 1h38m with ComfyUI idle, blocking
+  an atlas bake).
 
 **Placement.** A lease names a target, not a host:
 
