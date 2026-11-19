@@ -198,6 +198,14 @@ class Residency:
             if v.next == "restart":
                 if svc is None or not svc.container or (r.node, svc.container) in restarted:
                     continue
+                # A restart takes every resident of the container with it (Ollama's models share one): never while
+                # another of them is pinned, busy or under a lease.
+                if any(
+                    o.id != r.id and (o.busy or (o.policy and o.policy.pinned) or self.broker.leases.in_use(o))
+                    for o in self.broker.residents()
+                    if o.node == r.node and o.service == r.service
+                ):
+                    continue
                 restarted.add((r.node, svc.container))
             outcome = "ok"
             try:

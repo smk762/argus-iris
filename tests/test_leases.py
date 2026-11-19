@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -415,3 +416,21 @@ async def test_long_poll_returns_when_the_lease_is_granted():
     got = await broker.leases.wait(rec.lease_id, 5)
     await task
     assert got.state == "granted"
+
+
+def test_a_queued_request_under_a_long_poll_is_not_dropped(world):
+    book, _, clock = world
+    rec = ask(book, not_before=clock.now + timedelta(hours=1), wait_s=0)  # a GET ?wait_s=60 polls it from here
+
+    async def run() -> None:
+        poll = asyncio.create_task(book.wait(rec.lease_id, 60))
+        await asyncio.sleep(0)
+        clock.advance(45)  # past the 30 s unpolled limit while the long poll is still open
+        book.tick()
+        assert rec.state == "queued"
+        poll.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poll
+
+    asyncio.run(run())
+    assert not book._polling

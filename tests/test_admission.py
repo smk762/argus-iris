@@ -424,3 +424,14 @@ def test_reclaim_ends_a_stalled_blocker_and_its_resume_stays_refused():
     assert w.book.heartbeat(holder.lease_id, Heartbeat()).state == "refused"
     again = w.book.request(LeaseRequest(tenant="agent-composer", target="ollama:qwen3:8b", resume=holder.lease_id))
     assert again.state == "refused"
+
+
+def test_reclaim_counts_from_the_yield_request_not_the_stall():
+    w, holder = _stall_world(lease_stall_reclaim=True)
+    _hold(w, holder, 3600)  # stalled long ago, nobody waiting: flagged only
+    assert holder.stalled_at is not None and not holder.yield_requested
+    waiter = w.ask(target="ollama:other", vram_mb=3000, request_id="waiter", constraints=GpuConstraints(node="dragon"))
+    _hold(w, holder, 20, waiter=waiter)
+    assert holder.state == "granted" and holder.yield_requested  # asked first, not reclaimed on the same tick
+    _hold(w, holder, 300, waiter=waiter)
+    assert holder.state == "refused"

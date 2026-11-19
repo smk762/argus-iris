@@ -315,6 +315,9 @@ class Broker:
         failed: list[str] = []
         try:
             for rid in resident_ids:
+                rec = self.leases.leases.get(lease_id)
+                if rec is None or rec.state != "queued":
+                    break  # released, expired or refused meanwhile: evicting more would free memory for nobody
                 try:
                     result = await evict_resident(self, rid, reason=f"admission: lease {lease_id}")
                 except ActionError as exc:

@@ -299,6 +299,8 @@ class LeaseBook:
         self._last_used: dict[tuple[str, str], datetime] = {}  # (node, model or service) -> when its last lease ended
         self._services: dict[str, str | None] = {}  # lease id -> the service it was granted on
         self._reclaimed: dict[str, datetime] = {}  # lease id -> when a stall reclaimed it (resume must not re-grant)
+        self._yield_since: dict[str, datetime] = {}  # lease id -> when it was first asked to yield (the reclaim clock)
+        self._polling: Counter[str] = Counter()  # lease id -> long polls held open on it now (it is being polled)
 
     # --- tenants -------------------------------------------------------------------------------------------------
 
@@ -693,7 +695,11 @@ class LeaseBook:
             if rec.state == "queued":
                 if rec.deadline and rec.deadline <= now:
                     self._end(rec, "refused", now, reason="deadline passed while queued")
-                elif rec.last_poll and (now - rec.last_poll).total_seconds() > max(UNPOLLED_MIN_S, 2 * rec.wait_s):
+                elif (
+                    not self._polling[rec.lease_id]  # a long poll held open longer than the limit is still a poll
+                    and rec.last_poll
+                    and (now - rec.last_poll).total_seconds() > max(UNPOLLED_MIN_S, 2 * rec.wait_s)
+                ):
                     self._end(rec, "expired", now, reason="nobody polled the queued request")
             elif rec.state == "granted" and rec.expires_at and rec.expires_at <= now:
                 why = "no heartbeat since the grant" if rec.heartbeats == 0 else "no heartbeat within the TTL"
@@ -723,6 +729,7 @@ class LeaseBook:
         rec.active_at = now
         if rec.stalled_at is not None:
             rec.stalled_at, rec.yield_requested = None, False
+            self._yield_since.pop(rec.lease_id, None)
             log.info("lease_unstalled", lease=rec.lease_id, tenant=rec.tenant, kind=rec.kind, node=rec.node)
             self._changed(rec)
 
@@ -750,9 +757,15 @@ class LeaseBook:
         if blocking != rec.yield_requested:
             rec.yield_requested = blocking
             if blocking:
+                self._yield_since[rec.lease_id] = now
                 log.info("lease_yield_requested", lease=rec.lease_id, tenant=rec.tenant, node=rec.node)
+            else:
+                self._yield_since.pop(rec.lease_id, None)
             self._changed(rec)
-        if blocking and self.config.lease_stall_reclaim and (now - rec.stalled_at).total_seconds() >= limit / 2:
+        # The reclaim clock runs from the yield request, not the stall: a lease stalled long before anyone queued
+        # still gets lease_stall_s / 2 of heartbeat replies asking it to yield before it is taken back.
+        asked = self._yield_since.get(rec.lease_id)
+        if blocking and self.config.lease_stall_reclaim and asked and (now - asked).total_seconds() >= limit / 2:
             self._reclaimed[rec.lease_id] = now
             self._end(
                 rec, "refused", now, reason=f"reclaimed: no GPU activity for {int(quiet // 60)} min", how="reclaimed"
@@ -764,6 +777,7 @@ class LeaseBook:
         if rec.state == "granted" and rec.node:
             self._last_used[(rec.node, self._use_key(rec))] = now
         rec.state, rec.ended_at, rec.expires_at = state, now, None
+        self._yield_since.pop(rec.lease_id, None)
         if reason:
             rec.reason = reason
         how = how or (rec.outcome if state == "released" and rec.outcome else state)
@@ -806,8 +820,14 @@ class LeaseBook:
         if rec is None or wait_s <= 0 or rec.state != "queued":
             return rec
         event = self._waiters.setdefault(lease_id, asyncio.Event())
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(event.wait(), wait_s)
+        self._polling[lease_id] += 1
+        try:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(event.wait(), wait_s)
+        finally:
+            self._polling[lease_id] -= 1
+            if self._polling[lease_id] <= 0:
+                del self._polling[lease_id]
         return self.get(lease_id)
 
     # --- views ---------------------------------------------------------------------------------------------------

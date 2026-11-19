@@ -47,7 +47,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from argus_cortex.gpu_wire import PriorityClass
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, field_validator
 
 from argus_iris.models import Resident
 
@@ -129,7 +129,8 @@ def _cron(value: object) -> Cron:
     return value if isinstance(value, Cron) else Cron(str(value))
 
 
-CronExpr = Annotated[Cron, BeforeValidator(_cron)]
+# Serialised as its expression, so GET /policy can return a policy with windows.
+CronExpr = Annotated[Cron, BeforeValidator(_cron), PlainSerializer(lambda c: c.expr, return_type=str)]
 
 
 class _Model(BaseModel):

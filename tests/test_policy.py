@@ -368,3 +368,16 @@ async def test_host_ram_limit_defaults_to_the_tenant_manifest_hint():
     await broker.poll_once()
     v = view(broker, "morpheus/comfyui")
     assert (v.enforce, v.next) == (False, "restart")  # reported; acting still needs the rule's enforce
+
+
+def test_a_policy_with_crons_serialises_for_get_policy():
+    import json
+
+    p = Policy.model_validate(
+        {
+            "windows": [{"name": "w", "cron": "0 1 * * *", "duration": "5h", "tenant": "t", "class": "batch"}],
+            "residents": [{"keepalive": {"cron": "0 2 * * *", "duration": "1h"}}],
+        }
+    )
+    data = json.loads(p.model_dump_json(by_alias=True))
+    assert data["windows"][0]["cron"] == "0 1 * * *" and data["residents"][0]["keepalive"]["cron"] == "0 2 * * *"

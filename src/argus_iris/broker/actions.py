@@ -302,7 +302,10 @@ async def evict_resident(
         result.model_state = now.detail.get("model_state")
     # The service took the call: what it holds now is its floor until it loads something again, confirmed or not.
     # Without this, ComfyUI at a few hundred MB after /free (which frees nothing more) would be evicted every minute.
-    broker.residuals[resident.id] = result.after_mb
+    # Not for an Ollama model still listed unconfirmed, though: it is still loaded (a slow or refused unload), and
+    # recording its full size would make it count as evicted, so idle-kill would never try it again.
+    if result.confirmed or now is None or resident.source != ResidentSource.OLLAMA:
+        broker.residuals[resident.id] = result.after_mb
     broker.residency.annotate(broker.nodes[resident.node])  # the policy view now knows it is evicted
     if result.confirmed:
         result.residual_mb = result.after_mb
