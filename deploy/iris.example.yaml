@@ -63,7 +63,8 @@ services:
       base_url: "http://dragon:9150/api/runtime/residents/infinity", token_env: RAG_CHAT_API_KEY }
 
 # Admission. "observe" (the default) grants every lease at once and records whether it would have fit; "enforce"
-# queues what does not fit, spills to the next node (ollama-dragon, then ollama-jarrah), and evicts idle residents
+# queues what does not fit, spills to the next node (the Ollama serving fewer leases first,
+# skipping one that has not pulled the model), and evicts idle residents
 # (least recently used, never busy or pinned) to make room. Watch iris_leases_over_admissible in observe first.
 admission: observe
 admission_min_idle_s: 60          # before a lower-class resident is evicted

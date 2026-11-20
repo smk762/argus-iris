@@ -209,7 +209,10 @@ that ignores it is not killed, but from the first `yield_requested` iris stops e
 - `comfyui`: the node(s) running ComfyUI (morpheus).
 - `ollama:<model>`: dragon first, spill to jarrah when dragon cannot admit it and the model fits jarrah. With
   SingGuard pinned on dragon (about 5.8 GiB of 8 GiB, plus Infinity and nomic-embed-text), dragon has about 1.75 GiB
-  left, so in practice any general model larger than an embedder lands on jarrah.
+  left, so in practice any general model larger than an embedder lands on jarrah. Where both fit, the Ollama serving
+  fewer granted leases goes first (then the one with the model loaded), so concurrent jobs spread over the two; an
+  Ollama whose `/api/tags` lacks the model is skipped unless none has it. A lease that fits nowhere waits on the node
+  its running leases would free.
 - `in-process` with constraints: `min_vram_mb`, `bf16`, `min_cc`, or an explicit node for a process pinned to a host.
 
 ## Policy: schedules, keepalive, idle-kill

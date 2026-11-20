@@ -133,6 +133,7 @@ class ServiceState(BaseModel):
     error: str | None = None
     queue_running: int | None = None
     queue_pending: int | None = None
+    available: list[str] | None = None  # models it has pulled (Ollama); None when it cannot say
 
 
 class NodeLedger(BaseModel):

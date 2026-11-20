@@ -1,4 +1,5 @@
-"""Ollama: the loaded models from ``/api/ps``, with their VRAM share and keep-alive expiry."""
+"""Ollama: the loaded models from ``/api/ps``, with their VRAM share and keep-alive expiry, and the pulled ones
+from ``/api/tags`` (placement skips a service that would have to pull the model)."""
 
 from __future__ import annotations
 
@@ -50,4 +51,13 @@ class OllamaAdapter:
                     detail={"size_mb": size // MIB, "partial_offload": 0 < size_vram < size},
                 )
             )
-        return ServiceReading(up=True, models=models)
+        return ServiceReading(up=True, models=models, available=await self._tags(client))
+
+    async def _tags(self, client: httpx.AsyncClient) -> list[str] | None:
+        try:
+            resp = await client.get(f"{self.service.base_url}/api/tags", headers=self.service.headers())
+            resp.raise_for_status()
+            names = [m.get("name") or m.get("model") for m in resp.json().get("models") or []]
+        except (httpx.HTTPError, ValueError, AttributeError):
+            return None  # unknown: placement does not filter on it
+        return sorted(n for n in names if n)
