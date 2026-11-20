@@ -56,7 +56,8 @@ curl -X POST -H "Authorization: Bearer $ARGUS_GPU_BROKER_TOKEN" http://morpheus:
 It needs `ARGUS_GPU_BROKER_TOKEN` (callers) and `IRIS_AGENT_TOKEN` (matching the agents') set on the broker.
 
 The other manual action frees a resident's VRAM through its adapter: Ollama gets `keep_alive: 0` for that model,
-ComfyUI `POST /free`, an argus-http service its `evict_path` (GPU to CPU, kept warm) or else its `unload_path`. A busy
+ComfyUI `POST /free`, an argus-http service its `evict_path` (GPU to CPU, kept warm) or else its `unload_path`, and an
+external service (Immich's ML server) has its container stopped, only with `evict_by: stop` (else 422). A busy
 resident is refused with 409; iris then waits until the agent sees the memory come back (`evict_confirm_s`, 30 s) and
 reports what the resident still holds (a CUDA context, say, which only a restart frees):
 

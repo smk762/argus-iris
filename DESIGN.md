@@ -58,7 +58,7 @@ scheduler and uses `croniter` for windows. No Redis.
  ┌──────────────────────────── argus-iris broker (:8120) ─────────────────────────┐
  │ registry (tenant manifests)   scheduler (classes, aging, affinity, backfill)    │
  │ ledger per node               policy (windows, keepalive, idle-kill)            │
- │ adapters: comfyui · ollama · argus-http · immich · container                    │
+ │ adapters: comfyui · ollama · argus-http · external                              │
  │ history: SQLite (WAL) on a volume                                               │
  └──────────────┬──────────────────────────┬──────────────────────────┬────────────┘
                 │ GET /snapshot            │                          │
@@ -113,8 +113,7 @@ Units: every memory figure on the wire is MiB (NVML bytes / 2^20), named `*_mb` 
 | comfyui | `/system_stats`, `/queue`, `/object_info` for loaded models | `POST /free {unload_models, free_memory}`; container `restart` when host RAM is high and the queue is empty | container `start`, then wait for `/system_stats` |
 | ollama | `/api/ps` (`size_vram`, `expires_at`) | `POST /api/generate {model, keep_alive: 0}` | `POST /api/generate {model, keep_alive: <window>}` |
 | argus-http | `/health` (`vram_status`) | `POST /admin/unload` (lens has it; others add it) | first request, or `POST /admin/wake` |
-| immich | node agent only | set `MACHINE_LEARNING_MODEL_TTL` low; never kill | none |
-| container | node agent | `stop` (last resort, opt-in per tenant) | `start` |
+| external | `health_path` up/down; VRAM and idle from the node agent | none, or container `stop` with `evict_by: stop` (opt-in per service, and for admission an enforced policy rule) | container `start`; admission's stops are started again once no lease is active on the node (#29) |
 
 Adapters are configured by tenant manifests, not hard-coded per service as gothmog was. The argus-http adapter's
 paths are per manifest, because the services that already have lifecycle endpoints spell them differently.

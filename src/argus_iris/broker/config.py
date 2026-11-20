@@ -40,7 +40,9 @@ class ServiceConfig(BaseModel):
 
     id: str
     node: str
-    adapter: Literal["comfyui", "ollama", "argus-http"]
+    # external: a service outside the suite (Immich's ML server) read for up/down only, through health_path; its VRAM
+    # is attributed through `container` like any other.
+    adapter: Literal["comfyui", "ollama", "argus-http", "external"]
     base_url: str
     # Container name on the node, to match the agent's GPU processes to this service (and, later, to warm it).
     container: str | None = None
@@ -56,6 +58,17 @@ class ServiceConfig(BaseModel):
     # Name of an environment variable holding a bearer token sent on every request to this service (rag-chat's
     # resident gateway needs one even for reads; ARGUS_ADMIN_TOKEN guards /admin/*). Never the token itself.
     token_env: str | None = None
+    # external only: how iris may free it. None: it cannot (observe only; an evict is refused). "stop": the node's
+    # agent stops the container (its own IRIS_AGENT_CONTAINERS allowlist still applies) and a warm starts it again.
+    # For a service whose clients fall back elsewhere when it is down (Immich to its CPU ML), so a stop costs speed,
+    # not an outage. Admission stops it only while a policy rule matching it says `enforce: true`.
+    evict_by: Literal["stop"] | None = None
+
+    @model_validator(mode="after")
+    def _check_evict_by(self) -> ServiceConfig:
+        if self.evict_by and (self.adapter != "external" or not self.container):
+            raise ValueError(f"{self.id}: evict_by needs adapter: external and a container")
+        return self
 
     def headers(self) -> dict[str, str]:
         token = os.environ.get(self.token_env, "") if self.token_env else ""
