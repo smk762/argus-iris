@@ -170,9 +170,11 @@ class Candidate:
 
 
 def _model_key(name: str | None) -> str | None:
-    """Ollama lists ``nomic-embed-text`` as ``nomic-embed-text:latest``; compare the two as one."""
+    """A model as Ollama resolves it, for comparison only: ``:latest`` implied, and case-insensitive (Ollama serves
+    ``Qwen2.5:7b`` to a request for ``qwen2.5:7b``)."""
     if not name:
         return None
+    name = name.lower()
     return name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest"
 
 
