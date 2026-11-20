@@ -128,6 +128,8 @@ def test_a_service_without_the_model_pulled_is_skipped(world):
     assert ask(book, target="ollama:qwen3:8b").node == "jarrah"
     assert ask(book, target="ollama:nomic-embed-text").node == "jarrah"  # ":latest" implied
     assert ask(book, target="ollama:llama3:8b").node == "dragon"
+    nodes["jarrah"] = node("jarrah", available=["Qwen2.5:7b"], models=[("ollama-jarrah", "Qwen2.5:7b")])
+    assert ask(book, target="ollama:qwen2.5:7B").node == "jarrah"  # Ollama names are case-insensitive
 
 
 def test_no_service_has_the_model_or_cannot_say_keeps_them_all(world):
