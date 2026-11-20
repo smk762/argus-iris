@@ -61,7 +61,7 @@ def snapshot(node: str, total: int, free: int, procs: list[GpuProcess]) -> dict:
     ).model_dump(mode="json")
 
 
-def network(*, dragon_agent_up: bool = True, comfy_queue: int = 0):
+def network(*, dragon_agent_up: bool = True, comfy_queue: int = 0, tags: bool = True):
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if url == "http://morpheus:9110/snapshot":
@@ -91,6 +91,8 @@ def network(*, dragon_agent_up: bool = True, comfy_queue: int = 0):
             return httpx.Response(200, json={"queue_running": [["x"]] * comfy_queue, "queue_pending": []})
         if url == "http://morpheus:8101/health":
             return httpx.Response(200, json={"status": "ok", "vram_status": {"loaded": True}})
+        if url == "http://dragon:11434/api/tags" and tags:
+            return httpx.Response(200, json={"models": [{"name": "qwen3:8b"}, {"model": "nomic-embed-text:latest"}]})
         if url == "http://dragon:11434/api/ps":
             return httpx.Response(
                 200,
@@ -142,6 +144,18 @@ async def test_busy_comfyui_is_never_idle() -> None:
     await broker.poll_once()
     comfy = next(r for r in broker.nodes["morpheus"].residents if r.service == "comfyui")
     assert comfy.busy and comfy.idle_s is None
+
+
+async def test_ollama_reports_its_pulled_models() -> None:
+    broker = Broker(BrokerConfig.model_validate(CONFIG), client=network())
+    await broker.poll_once()
+    (svc,) = [s for s in broker.nodes["dragon"].services if s.adapter == "ollama"]
+    assert (svc.up, svc.available) == (True, ["nomic-embed-text:latest", "qwen3:8b"])
+
+    broker = Broker(BrokerConfig.model_validate(CONFIG), client=network(tags=False))
+    await broker.poll_once()
+    (svc,) = [s for s in broker.nodes["dragon"].services if s.adapter == "ollama"]
+    assert (svc.up, svc.available) == (True, None)  # /api/tags failing is "unknown", not "has nothing"
 
 
 async def test_unreachable_agent_keeps_ollama_residents() -> None:

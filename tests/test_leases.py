@@ -43,7 +43,9 @@ MANIFEST = TenantManifest(
 )
 
 
-def node(name: str, *, admissible: int = 4000, services: dict[str, bool] | None = None, models=()) -> NodeState:
+def node(
+    name: str, *, admissible: int = 4000, services: dict[str, bool] | None = None, models=(), available=None
+) -> NodeState:
     svc = {s.id: True for s in CONFIG.services_on(name)} | (services or {})
     return NodeState(
         name=name,
@@ -61,7 +63,10 @@ def node(name: str, *, admissible: int = 4000, services: dict[str, bool] | None 
             unattributed_mb=0,
             admissible_mb=admissible,
         ),
-        services=[ServiceState(id=i, node=name, adapter="ollama", base_url="", up=up) for i, up in svc.items()],
+        services=[
+            ServiceState(id=i, node=name, adapter="ollama", base_url="", up=up, available=available)
+            for i, up in svc.items()
+        ],
         residents=[
             Resident(id=f"{name}/{s}/{m}", node=name, service=s, source=ResidentSource.OLLAMA, model=m, vram_mb=5000)
             for s, m in models
@@ -116,6 +121,36 @@ def test_a_down_service_is_skipped_and_constraints_are_honoured(world):
     assert pinned.node == "dragon"  # the only candidate, so it is placed there even while down
 
 
+def test_a_service_without_the_model_pulled_is_skipped(world):
+    book, nodes, _ = world
+    nodes["dragon"] = node("dragon", available=["llama3:8b"])
+    nodes["jarrah"] = node("jarrah", available=["qwen3:8b", "nomic-embed-text:latest"])
+    assert ask(book, target="ollama:qwen3:8b").node == "jarrah"
+    assert ask(book, target="ollama:nomic-embed-text").node == "jarrah"  # ":latest" implied
+    assert ask(book, target="ollama:llama3:8b").node == "dragon"
+
+
+def test_no_service_has_the_model_or_cannot_say_keeps_them_all(world):
+    book, nodes, _ = world
+    nodes["dragon"] = node("dragon", available=[])
+    nodes["jarrah"] = node("jarrah", available=[])
+    assert ask(book, target="ollama:new:1b").node == "dragon"  # nobody has it: the caller may mean to pull
+    nodes["dragon"] = node("dragon", available=None)  # /api/tags unanswered: not filtered
+    nodes["jarrah"] = node("jarrah", available=["new:1b"])
+    rec = ask(book, target="ollama:new:1b")
+    assert rec.node in {"dragon", "jarrah"} and len(book._candidates(rec)[0]) == 2
+
+
+def test_concurrent_leases_spread_over_the_services(world):
+    book, nodes, _ = world
+    nodes["dragon"] = node("dragon", models=[("ollama-dragon", "qwen3:8b")])
+    first = ask(book, target="ollama:qwen3:8b", vram_mb=1000)
+    second = ask(book, target="ollama:qwen3:8b", vram_mb=1000)
+    assert (first.node, second.node) == ("dragon", "jarrah")  # busy beats warm
+    book.release(first.lease_id, LeaseRelease())
+    assert ask(book, target="ollama:qwen3:8b", vram_mb=1000).node == "dragon"  # idle again, and warm
+
+
 def test_full_node_is_still_granted_but_marked(world):
     book, nodes, _ = world
     nodes["dragon"] = node("dragon", admissible=1000)
@@ -129,7 +164,7 @@ def test_fit_counts_granted_leases_and_resident_models(world):
     nodes["dragon"] = node("dragon", admissible=4000, models=[("ollama-dragon", "qwen3:8b")])
     first = ask(book, target="ollama:qwen3:8b", vram_mb=6000, model_mb=5200)
     assert first.fits is True  # loaded already: only the 800 MB working set is new
-    big = ask(book, target="ollama:other", vram_mb=3500)
+    big = ask(book, target="ollama:other", vram_mb=3500, constraints=GpuConstraints(node="dragon"))
     assert (big.fits, big.admissible_mb) == (False, 3200)  # 4000 less the first lease's 800
 
 

@@ -108,6 +108,7 @@ def compose_node(
             error=r.error,
             queue_running=r.queue_running,
             queue_pending=r.queue_pending,
+            available=r.available,
         )
         for svc, r in services
     ]

@@ -13,8 +13,9 @@ with ``lease_stall_reclaim`` it is ended ``refused`` once it has ignored that fo
 keepalive's ``resume`` cannot re-grant it.
 
 **Placement** follows the target. A service target (``ollama:<model>``, ``comfyui``) goes to the services that serve
-it, in config order (``ollama-dragon`` before ``ollama-jarrah``), a node where the model is already resident first,
-services that are down last. ``in-process`` goes to the constrained node, the tenant's own node, or any node that
+it: up before down, then the one serving fewest granted leases, then one where the model is already resident, then
+config order (``ollama-dragon`` before ``ollama-jarrah``). An Ollama that lists its pulled models and lacks this one
+is skipped, unless none has it. ``in-process`` goes to the constrained node, the tenant's own node, or any node that
 meets ``min_cc`` and ``bf16``.
 
 **Admission** has two modes (``admission`` in the broker config):
@@ -46,7 +47,7 @@ import contextlib
 import fnmatch
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -71,7 +72,7 @@ from pydantic import BaseModel
 
 from argus_iris.broker.config import BrokerConfig
 from argus_iris.broker.policy import Policy
-from argus_iris.models import NodeState, Resident, ResidentSource, utcnow
+from argus_iris.models import NodeState, Resident, ResidentSource, ServiceState, utcnow
 
 log = structlog.get_logger("argus_iris.leases")
 
@@ -224,9 +225,18 @@ def _capacity(state: NodeState | None, config: BrokerConfig, node: str) -> int |
 
 
 def candidates(
-    rec: LeaseRecord, constraints: GpuConstraints, home: str | None, config: BrokerConfig, nodes: dict[str, NodeState]
+    rec: LeaseRecord,
+    constraints: GpuConstraints,
+    home: str | None,
+    config: BrokerConfig,
+    nodes: dict[str, NodeState],
+    load: Mapping[str, int] | None = None,
 ) -> tuple[list[Candidate], str | None]:
-    """Where *rec* could run, best first, or ``([], why)`` when nowhere."""
+    """Where *rec* could run, best first, or ``([], why)`` when nowhere.
+
+    *load* counts the granted leases on each service: of two that are up and have the model, the one serving fewer
+    goes first, ahead of the one that has it loaded already (a load costs seconds, waiting behind a job far more).
+    """
     wanted = constraints.node
     if rec.target == IN_PROCESS:
         names = [wanted] if wanted else ([home] if home else list(config.nodes))
@@ -242,14 +252,26 @@ def candidates(
     if not services:
         return [], f"no configured service serves {rec.target}" + (f" on {wanted}" if wanted else "")
     model = _model_key(target_model(rec.target))
+    load = load or {}
 
-    def order(svc) -> tuple[bool, bool]:
-        state = nodes.get(svc.node)
-        up = bool(state and any(s.id == svc.id and s.up for s in state.services))
+    def state_of(svc) -> ServiceState | None:
+        node = nodes.get(svc.node)
+        return next((s for s in node.services if s.id == svc.id), None) if node else None
+
+    def lacks(svc) -> bool:
+        """The service says which models it has pulled, and this is not one of them."""
+        st = state_of(svc)
+        return bool(model and st and st.available is not None and model not in {_model_key(m) for m in st.available})
+
+    if model and not all(lacks(s) for s in services):  # none has it: leave them all, the caller may mean to pull
+        services = [s for s in services if not lacks(s)]
+
+    def order(svc) -> tuple[bool, int, bool]:
+        state, st = nodes.get(svc.node), state_of(svc)
         warm = bool(
             model and state and any(r.service == svc.id and _model_key(r.model) == model for r in state.residents)
         )
-        return (not up, not warm)  # stable sort keeps config order within each group
+        return (not (st and st.up), load.get(svc.id, 0), not warm)  # stable sort keeps config order within a group
 
     services.sort(key=order)
     return [Candidate(s.node, config.nodes[s.node].gpu, s.base_url, s.id) for s in services], None
@@ -409,6 +431,7 @@ class LeaseBook:
             manifest.node if manifest else None,
             self.config,
             self._nodes(),
+            Counter(self._services.get(o.lease_id) for o in self._granted()),
         )
 
     def _granted(self) -> list[LeaseRecord]:
@@ -521,7 +544,14 @@ class LeaseBook:
             self._evict(rec.lease_id, ids)
             return
 
-        first = cands[0]
+        def still_short(c: Candidate) -> int:
+            """What the node would still lack once the leases granted on it are released: wait where that frees it."""
+            state = nodes[c.node]
+            _, admissible = _fit(c.node, state, rec, granted, reserved[c.node])
+            held = sum(_new_mb(o, state) for o in granted if o.node == c.node)
+            return max(0, _new_mb(rec, state) - (admissible or 0) - held)
+
+        first = min(cands, key=still_short)  # ties keep placement order
         _, admissible = _fit(first.node, nodes.get(first.node), rec, granted, reserved[first.node])
         rec.node = first.node
         reserved[first.node] += rec.vram_mb  # the head's reservation: nothing lower takes this node's memory
