@@ -572,6 +572,13 @@ class LeaseBook:
         """A resident takes the class of the last lease that used it; background if none has."""
         return self._last_class.get((r.node, _model_key(r.model) or r.service), "background")
 
+    def _stoppable(self, r: Resident) -> bool:
+        """An external resident admission may stop: ``evict_by: stop``, and a policy rule matching it enforced. A
+        stop takes the whole service away (its clients fall back), so it is opted into per resident, observe first."""
+        svc = next((s for s in self.config.services if s.id == r.service and s.node == r.node), None)
+        rule = self.policy.rule_for(r)
+        return bool(svc and svc.evict_by == "stop" and rule and rule[1].enforce)
+
     def _plan(
         self,
         rec: LeaseRecord,
@@ -583,8 +590,9 @@ class LeaseBook:
     ) -> list[Resident] | None:
         """The fewest residents on *where* whose eviction frees *short* MB, or None if no set can.
 
-        Eligible: idle long enough, not busy, pinned, under a live lease, being evicted, recently failed, already
-        unloaded, the model asked for, or of a higher class than the request. A same-class resident must also have
+        Eligible: freeable (through an adapter, or an external service iris may stop: :meth:`_stoppable`), idle long
+        enough, and not busy, pinned, under a live lease, being evicted, recently failed, already unloaded, the model
+        asked for, or of a higher class than the request. A same-class resident must also have
         been idle, and loaded, for ``admission_same_class_idle_s``. Lower classes are taken first, then the longest
         idle; then any victim the rest already cover is dropped.
         """
@@ -606,6 +614,7 @@ class LeaseBook:
             theirs = _rank(self._class_of(r))
             if (
                 r.source == ResidentSource.PROCESS  # no adapter to evict it
+                or (r.source == ResidentSource.EXTERNAL and not self._stoppable(r))
                 or r.busy
                 or r.idle_s is None
                 or r.idle_s < self.config.admission_min_idle_s

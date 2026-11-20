@@ -33,6 +33,10 @@ residents:                         # first matching rule wins; fnmatch patterns
     restart_residual_mb: 64        # an unload leaves ~94 MB of CUDA context; only a restart returns it
   - match: { resident: "dragon/infinity" }
     idle_kill: 10m
+  # Immich's ML server (evict_by: stop): with nothing but enforce, admission may stop it when a lease on dragon needs
+  # the room, and iris starts it again once no lease is active there. Leave enforce off to see "would stop" first.
+  - match: { resident: "dragon/immich-ml" }
+    enforce: false
   # Ollama on dragon: with OLLAMA_KEEP_ALIVE=server, iris extends keep_alive until idle-kill.
   - match: { node: dragon, ollama: "*" }
     idle_kill: 15m

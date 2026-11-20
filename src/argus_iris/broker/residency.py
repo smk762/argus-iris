@@ -22,6 +22,10 @@ are handed over one at a time (#6).
   container's anonymous memory is above it, and which has been idle ``restart_host_ram_idle`` (120 s), is restarted
   the same way. ComfyUI keeps offloaded weights in host RAM and only a restart returns them (voluptas#16). A restart
   throws away whatever the service has loaded, so never while pinned, busy or under a lease.
+- **External services** (``adapter: external``): iris cannot free one unless it has ``evict_by: stop``; then
+  idle-kill stops its container, and so may admission when a lease needs the room, both only while the matching rule
+  is enforced (a rule with nothing but ``enforce: true`` opts it into admission alone). One admission stopped is
+  warmed again (the agent starts it) once no lease is active on its node and the node can admit it.
 """
 
 from __future__ import annotations
@@ -137,17 +141,21 @@ class Residency:
     ) -> tuple[str | None, str | None]:
         ollama = r.source == ResidentSource.OLLAMA
         left = (r.expires_at - now).total_seconds() if r.expires_at else None
+        external = r.source == ResidentSource.EXTERNAL
+        stoppable = external and (svc := self._service(r)) is not None and svc.evict_by == "stop"
         if pinned:
             if ollama and (r.expires_at is None or r.expires_at - now < PIN_HORIZON):
                 return "pin", "pinned: keep_alive -1"
             return None, "pinned"
         if due is None:
+            if stoppable:
+                return None, "stopped when a lease needs the room" if rule.enforce else "would stop for a lease"
             return None, None
         if due > 0:
             if ollama and left is not None and left < REFRESH_MARGIN_S and left < due:
                 return "extend", f"keep_alive to {int(due + REFRESH_MARGIN_S)}s"
             return None, None
-        if r.source == ResidentSource.PROCESS:
+        if r.source == ResidentSource.PROCESS or (external and not stoppable):
             return None, "due, but iris has no adapter for it"
         state = r.detail.get("model_state")
         if state == "cpu":
@@ -185,6 +193,7 @@ class Residency:
         )
 
         now = self._clock()
+        await self._rewarm(now)
         restarted: set[tuple[str, str]] = set()  # (node, container): Ollama's models share one container
         for r in self.broker.residents():
             v = r.policy
@@ -227,3 +236,28 @@ class Residency:
                 log.warning("residency_failed", resident=r.id, action=v.next, error=str(exc))
             self.actions[(r.node, v.next, outcome)] += 1
             log.info("residency_action", resident=r.id, action=v.next, outcome=outcome, note=v.note, idle_s=v.idle_s)
+
+    async def _rewarm(self, now: datetime) -> None:
+        """Start again what admission stopped for room, once no lease is active on its node. The warm itself refuses
+        while the node cannot admit what the service was seen holding, so it is retried on a later step."""
+        from argus_iris.broker.actions import ActionError, warm_service  # noqa: PLC0415 - actions imports the broker
+
+        for service_id in list(self.broker.stopped):
+            svc = next((s for s in self.broker.config.services if s.id == service_id), None)
+            if svc is None:  # pragma: no cover - only configured services are stopped
+                self.broker.stopped.pop(service_id, None)
+                continue
+            key = f"rewarm:{service_id}"
+            until = self._cooldown.get(key)
+            if (until and now < until) or self.broker.leases.active(svc.node):
+                continue
+            self._cooldown[key] = now + timedelta(seconds=COOLDOWN_S)
+            outcome = "ok"
+            try:
+                result = await warm_service(self.broker, service_id)
+                outcome = "ok" if result.up else "failed"
+            except ActionError as exc:
+                outcome = "failed"
+                log.info("residency_rewarm_deferred", service=service_id, error=str(exc))
+            self.actions[(svc.node, "rewarm", outcome)] += 1
+            log.info("residency_action", service=service_id, action="rewarm", outcome=outcome)

@@ -32,7 +32,7 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
   time (VRAM unchanged **and** no utilisation), `procfs.py` maps PIDs to containers through cgroups and reads anon
   memory, `docker.py` is a minimal Engine API client over the Unix socket, `app.py` serves `/snapshot`, `/metrics`,
   `/health` and token- and allowlist-gated `POST /containers/{name}/{start|stop|restart}`.
-- `broker/` — `config.py` (YAML, `IRIS_CONFIG`), `adapters/` (comfyui, ollama, argus-http; read-only),
+- `broker/` — `config.py` (YAML, `IRIS_CONFIG`), `adapters/` (comfyui, ollama, argus-http, external; read-only; external is up/down from `health_path` only, freed by a container stop only with `evict_by: stop`, which admission uses only under an enforced policy rule and `Broker.stopped` re-warms),
   argus-http validates `/health` as cortex's `ResidentHealth` and reads older shapes best-effort, logging
   `resident_off_contract` (and `detail.off_contract` on the resident); a truthy non-bool `busy` counts as busy,
   `state.py` (`Broker` polls agents and adapters, ticks the lease book every second; `compose_node` is the pure

@@ -91,6 +91,7 @@ class ResidentSource(StrEnum):
     COMFYUI = "comfyui"
     OLLAMA = "ollama"
     ARGUS_HTTP = "argus-http"
+    EXTERNAL = "external"  # a configured service outside the suite, read for up/down only
     PROCESS = "process"  # a GPU process no configured service claims
 
 

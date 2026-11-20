@@ -168,21 +168,25 @@ function policyText(p) {
   return p.note ? `policy: ${p.note}` : null;
 }
 
-// Residents iris can evict: those read through an adapter, while they hold VRAM. Observed processes have none.
+// Residents iris can evict: those read through an adapter, while they hold VRAM. Observed processes have none, and
+// an external service only when it is configured to be stopped (evict_by: stop).
 function evictCell(r) {
   const cell = el("td", {});
   const freed = ["unloaded", "cpu"].includes(r.detail?.model_state);
-  if (r.source === "process" || freed) return cell;
-  const btn = el("button", { type: "button", class: "btn ghost", text: "Evict", disabled: r.busy,
-    title: r.busy ? "busy: iris never interrupts work" : "free its VRAM (to CPU where the service can, else unload)" });
+  const stop = r.source === "external" && config?.services?.find((s) => s.id === r.service)?.evict_by === "stop";
+  if (r.source === "process" || (r.source === "external" && !stop) || freed) return cell;
+  const btn = el("button", { type: "button", class: "btn ghost", text: stop ? "Stop" : "Evict", disabled: r.busy,
+    title: r.busy ? "busy: iris never interrupts work"
+      : stop ? "stop its container: its clients fall back elsewhere; Warm starts it again"
+      : "free its VRAM (to CPU where the service can, else unload)" });
   btn.addEventListener("click", () => runAction(`residents/${r.id.split("/").map(encodeURIComponent).join("/")}/evict`, r.id,
-    btn, cell, "Evict", "Evicting…", evictSummary));
+    btn, cell, btn.textContent, stop ? "Stopping…" : "Evicting…", evictSummary));
   cell.append(btn);
   const prev = lastResult.get(r.id);
   if (prev) cell.append(prev.cloneNode(true));
   return cell;
 }
-const evictSummary = (b) => `${b.action === "evict" ? "moved to CPU" : "unloaded"}: ${gb(b.before_mb - b.after_mb)} freed`
+const evictSummary = (b) => `${{ evict: "moved to CPU", stop: "stopped" }[b.action] ?? "unloaded"}: ${gb(b.before_mb - b.after_mb)} freed`
   + (b.residual_mb ? `, ${gb(b.residual_mb)} still held (restart frees it)` : "") + (b.confirmed ? "" : " (not confirmed)");
 
 function renderServices(node, state) {

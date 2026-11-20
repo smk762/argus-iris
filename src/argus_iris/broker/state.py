@@ -202,6 +202,9 @@ class Broker:
         self.residuals: dict[str, int] = {}
         # The most VRAM each resident has been seen holding, so a manual warm can tell whether it would fit.
         self.peaks: dict[str, int] = {}
+        # External services admission stopped for room (evict_by: stop) -> the lease it was for. Residency warms each
+        # again once no lease is active on its node and the node can admit it; a manual or idle-kill stop is not here.
+        self.stopped: dict[str, str] = {}
         self.residency = Residency(self, self.policy)
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(config.agent_timeout_s))
         self._adapters = {s.id: build_adapter(s) for s in config.services}
@@ -327,6 +330,8 @@ class Broker:
                 else:
                     if not result.confirmed:
                         failed.append(rid)
+                    elif result.action == "stop":
+                        self.stopped[result.service] = lease_id  # residency starts it again once the room is free
         finally:
             self.leases.evictions_done(lease_id, failed)
 

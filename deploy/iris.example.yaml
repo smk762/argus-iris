@@ -62,6 +62,12 @@ services:
   - { id: infinity, node: dragon, adapter: argus-http, container: infinity, warm_path: /admin/wake,
       base_url: "http://dragon:9150/api/runtime/residents/infinity", token_env: RAG_CHAT_API_KEY }
 
+  # Immich's ML server (external: no resident contract, GET /ping answers "pong"). Its VRAM is attributed through
+  # the container; evict_by: stop lets iris stop it (Immich falls back to its CPU ML on jarrah) once a policy rule
+  # matching dragon/immich-ml is enforced. Add immich_machine_learning to dragon's IRIS_AGENT_CONTAINERS.
+  - { id: immich-ml, node: dragon, adapter: external, base_url: "http://dragon:3003", health_path: /ping,
+      container: immich_machine_learning, evict_by: stop }
+
 # Admission. "observe" (the default) grants every lease at once and records whether it would have fit; "enforce"
 # queues what does not fit, spills to the next node (the Ollama serving fewer leases first,
 # skipping one that has not pulled the model), and evicts idle residents
