@@ -183,6 +183,9 @@ class ResidentRule(_Model):
     # manifest's `host_ram_restart_mb` hint for the resident's container applies.
     restart_host_ram_mb: int | None = Field(None, gt=0)
     restart_host_ram_idle: Duration = 120.0
+    # A pinned resident that drops out (an unload, a restart, an OOM, a model loaded over it) is warmed again once no
+    # lease is active or queued on its node and the node has room (#35). false: the pin only protects from eviction.
+    restore: bool = True
     enforce: bool = False
 
 
