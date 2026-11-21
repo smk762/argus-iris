@@ -435,3 +435,79 @@ def test_reclaim_counts_from_the_yield_request_not_the_stall():
     assert holder.state == "granted" and holder.yield_requested  # asked first, not reclaimed on the same tick
     _hold(w, holder, 300, waiter=waiter)
     assert holder.state == "refused"
+
+
+# --- a tenant's own memory (#36) ---------------------------------------------------------------------------------
+
+
+def curator_world(own_mb: int, **cfg) -> tuple[World, Resident]:
+    """dragon full, mostly with curator's own process (its ONNX Runtime arena), the rest an idle xtts at its floor."""
+    from argus_cortex.gpu_wire import TenantManifest
+
+    w = World(config(**cfg))
+    proc = res("dragon", "studio-rec-curator", own_mb, source=ResidentSource.PROCESS, container="studio-rec-curator")
+    proc.tenant = "argus-curator"
+    w.nodes["dragon"] = node("dragon", 0, [proc, res("dragon", "xtts", 140, idle=900, model_state="unloaded")])
+    w.book.register(TenantManifest(tenant="argus-curator", node="dragon"))
+    return w, proc
+
+
+def test_a_tenants_own_process_memory_counts_toward_its_in_process_lease():
+    w, _ = curator_world(6000)
+    rec = w.ask(tenant="argus-curator", vram_mb=512)
+    assert (rec.state, rec.node, rec.fits) == ("granted", "dragon", True)
+    assert w.evicted == []
+
+
+def test_the_credit_is_shared_by_the_tenants_leases_and_not_given_to_others():
+    w, _ = curator_world(1000)
+    first = w.ask(tenant="argus-curator", vram_mb=800)
+    second = w.ask(tenant="argus-curator", vram_mb=800)  # only 200 MB of the 1000 left to credit
+    other = w.ask(tenant="argus-darkroom", vram_mb=512)
+    assert first.state == "granted"
+    assert (second.state, second.reason) == ("queued", "waiting for 600 MB on dragon: nothing idle to evict")
+    assert other.node == "jarrah"  # no credit on dragon for another tenant: it goes where there is room
+
+
+def test_only_in_process_leases_get_the_credit():
+    w, _ = curator_world(6000)
+    w.nodes["jarrah"] = node("jarrah", 0)
+    rec = w.ask(tenant="argus-curator", target="ollama:qwen3:8b", vram_mb=512)
+    assert rec.state == "queued"  # the work runs in Ollama, not in curator's process: its memory is no help
+
+
+def test_a_tenants_own_residents_are_never_evicted_for_its_lease():
+    w = World()
+    mine = res("dragon", "xtts", 3000, idle=900)
+    mine.tenant = "agent-composer"
+    w.nodes["dragon"] = node("dragon", 500, [mine])
+    w.nodes["jarrah"] = node("jarrah", 0)
+    rec = w.ask(tenant="agent-composer", target="ollama:qwen3:8b", vram_mb=2000)
+    assert rec.state == "queued" and w.evicted == []
+    other = w.ask(tenant="argus-darkroom", target="ollama:qwen3:8b", vram_mb=2000)
+    assert w.evicted == [(other.lease_id, ["dragon/xtts"])]
+
+
+def test_residents_are_linked_by_configured_container_or_by_compose_service():
+    w = World(config(tenants={"argus-curator": {"containers": ["studio-rec-*"]}}))
+    by_pattern = res("dragon", "studio-rec-curator", 100, source=ResidentSource.PROCESS, container="studio-rec-curator")
+    by_service = res("dragon", "argus-lens", 100, source=ResidentSource.PROCESS, container="argus-suite-argus-lens-1")
+    stranger = res("dragon", "frigate", 100, source=ResidentSource.PROCESS, container="frigate")
+    assert w.book.tenant_of(by_pattern) == "argus-curator"
+    assert w.book.tenant_of(by_service) is None  # no tenant argus-lens known yet
+    w.ask(tenant="argus-lens", vram_mb=100)
+    assert w.book.tenant_of(by_service) == "argus-lens"
+    assert w.book.tenant_of(stranger) is None
+
+
+async def test_the_broker_labels_residents_with_their_tenant():
+    from test_evict import CONFIG as EVICT_CONFIG
+    from test_evict import World as Dragon
+
+    dragon = Dragon()
+    cfg = BrokerConfig.model_validate(EVICT_CONFIG | {"tenants": {"agent-composer": {"containers": ["xtts"]}}})
+    broker = Broker(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(dragon.handler)))
+    await broker.poll_once()
+    tenants = {r.id: r.tenant for r in broker.residents()}
+    assert tenants["dragon/xtts"] == "agent-composer"
+    assert tenants["dragon/whisper"] is None

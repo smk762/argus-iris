@@ -74,6 +74,12 @@ services:
   - { id: lens, node: morpheus, adapter: argus-http, base_url: "http://morpheus:8100", container: argus-lens,
       token_env: LENS_ADMIN_TOKEN }
 
+# Tenants' own containers (#36). An in-process lease counts the VRAM its tenant's own process already holds (a loaded
+# model, an allocator arena) as part of what it asks for, and admission never evicts a tenant's residents for that
+# tenant's lease. A process whose compose service is the tenant's name (argus-curator) is linked without an entry.
+# tenants:
+#   argus-curator: { containers: ["studio-rec-curator"] }
+
 # Admission. "observe" (the default) grants every lease at once and records whether it would have fit; "enforce"
 # queues what does not fit, spills to the next node (the Ollama serving fewer leases first,
 # skipping one that has not pulled the model), and evicts idle residents

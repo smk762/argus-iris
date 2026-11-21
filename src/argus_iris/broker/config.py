@@ -80,6 +80,17 @@ class ServiceConfig(BaseModel):
         return v.rstrip("/")
 
 
+class TenantConfig(BaseModel):
+    """A tenant's own processes on the GPU nodes (#36): what links a ``process`` resident to the tenant leasing for it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Container names (fnmatch) that run this tenant's work, e.g. ["argus-cull-argus-curator-1", "studio-rec-*"].
+    # Deployment-specific, so here rather than in the tenant manifest. A process resident whose compose service is
+    # the tenant's name is linked without an entry.
+    containers: list[str] = Field(default_factory=list)
+
+
 class BrokerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -116,6 +127,9 @@ class BrokerConfig(BaseModel):
     # Also take the reservation back from a stalled lease that blocks a queued one (it ends refused, "reclaimed"),
     # once it has ignored the yield for lease_stall_s / 2 more.
     lease_stall_reclaim: bool = False
+    # Tenant name -> its own containers. Admission counts the VRAM a tenant's own process already holds toward that
+    # tenant's in-process leases, and never evicts a tenant's residents for its own lease (#36).
+    tenants: dict[str, TenantConfig] = Field(default_factory=dict)
     # How often the residency policy (IRIS_POLICY: idle-kill, keepalive, restart) is acted on.
     residency_s: float = Field(15.0, gt=0)
 

@@ -203,6 +203,24 @@ def _new_mb(rec: LeaseRecord, state: NodeState) -> int:
     return rec.working_mb + (0 if loaded else (rec.model_mb or 0))
 
 
+def _own_credit(rec: LeaseRecord, state: NodeState, granted: list[LeaseRecord]) -> int:
+    """VRAM *rec*'s tenant already holds on the node in its own processes, less what its other granted leases there
+    claim (#36). An in-process lease runs in that process, so what the process holds (a loaded model, an allocator
+    arena) is part of the footprint the lease asks for, not something it competes with."""
+    if rec.target != IN_PROCESS:
+        return 0
+    own = sum(r.vram_mb for r in state.residents if r.source == ResidentSource.PROCESS and r.tenant == rec.tenant)
+    if not own:
+        return 0
+    others = sum(o.vram_mb for o in granted if o.tenant == rec.tenant and o.node == state.name and o is not rec)
+    return max(0, own - others)
+
+
+def _need(rec: LeaseRecord, state: NodeState, granted: list[LeaseRecord]) -> int:
+    """What *rec* adds on top of the node's ledger: :func:`_new_mb` less its tenant's own held memory."""
+    return max(0, _new_mb(rec, state) - _own_credit(rec, state, granted))
+
+
 def _fit(
     node: str, state: NodeState | None, rec: LeaseRecord, granted: list[LeaseRecord], reserved: int = 0
 ) -> tuple[bool | None, int | None]:
@@ -213,9 +231,9 @@ def _fit(
     """
     if state is None or state.ledger is None:
         return None, None
-    held = sum(_new_mb(o, state) for o in granted if o.node == node and o is not rec)
+    held = sum(_need(o, state, granted) for o in granted if o.node == node and o is not rec)
     admissible = max(0, state.ledger.admissible_mb - held - reserved)
-    return _new_mb(rec, state) <= admissible, admissible
+    return _need(rec, state, granted) <= admissible, admissible
 
 
 def _capacity(state: NodeState | None, config: BrokerConfig, node: str) -> int | None:
@@ -519,7 +537,7 @@ class LeaseBook:
 
         caps = [_capacity(nodes.get(c.node), self.config, c.node) for c in cands]
         if all(cap is not None for cap in caps) and all(
-            _new_mb(rec, nodes[c.node]) > cap for c, cap in zip(cands, caps, strict=True)
+            _need(rec, nodes[c.node], granted) > cap for c, cap in zip(cands, caps, strict=True)
         ):
             self._end(
                 rec, "refused", now, reason=f"needs {rec.vram_mb} MB; the most any candidate offers is {max(caps)} MB"
@@ -530,7 +548,7 @@ class LeaseBook:
         for i, c in enumerate(cands):
             state = nodes[c.node]
             _, admissible = _fit(c.node, state, rec, granted, reserved[c.node])
-            short = _new_mb(rec, state) - (admissible or 0)
+            short = _need(rec, state, granted) - (admissible or 0)
             victims = self._plan(rec, c, state, short, granted, now)
             if victims:
                 same = sum(1 for v in victims if self._class_of(v) == rec.priority)
@@ -550,8 +568,8 @@ class LeaseBook:
             """What the node would still lack once the leases granted on it are released: wait where that frees it."""
             state = nodes[c.node]
             _, admissible = _fit(c.node, state, rec, granted, reserved[c.node])
-            held = sum(_new_mb(o, state) for o in granted if o.node == c.node)
-            return max(0, _new_mb(rec, state) - (admissible or 0) - held)
+            held = sum(_need(o, state, granted) for o in granted if o.node == c.node)
+            return max(0, _need(rec, state, granted) - (admissible or 0) - held)
 
         first = min(cands, key=still_short)  # ties keep placement order
         _, admissible = _fit(first.node, nodes.get(first.node), rec, granted, reserved[first.node])
@@ -559,7 +577,7 @@ class LeaseBook:
         reserved[first.node] += rec.vram_mb  # the head's reservation: nothing lower takes this node's memory
         self._say(
             rec,
-            f"waiting for {_new_mb(rec, nodes[first.node]) - (admissible or 0)} MB on {first.node}: "
+            f"waiting for {_need(rec, nodes[first.node], granted) - (admissible or 0)} MB on {first.node}: "
             + ("nothing idle to evict" if self._evict is not None else "eviction is off"),
         )
 
@@ -614,6 +632,7 @@ class LeaseBook:
             theirs = _rank(self._class_of(r))
             if (
                 r.source == ResidentSource.PROCESS  # no adapter to evict it
+                or (r.tenant is not None and r.tenant == rec.tenant)  # the tenant's own: evicting it is self-defeating
                 or (r.source == ResidentSource.EXTERNAL and not self._stoppable(r))
                 or r.busy
                 or r.idle_s is None
@@ -879,6 +898,25 @@ class LeaseBook:
     @staticmethod
     def _resident_key(r: Resident) -> str:
         return _model_key(r.model) or r.service
+
+    def tenant_of(self, r: Resident) -> str | None:
+        """The tenant *r* belongs to (#36): its container matches a ``tenants`` entry in the broker config, or it is a
+        process whose compose service is named after a tenant iris knows (registered, configured, or leasing)."""
+        container = r.detail.get("container")
+        if container is None and r.source != ResidentSource.PROCESS:
+            svc = next((s for s in self.config.services if s.id == r.service and s.node == r.node), None)
+            container = svc.container if svc else None
+        if container:
+            for name, t in self.config.tenants.items():
+                if any(fnmatch.fnmatchcase(container, pat) for pat in t.containers):
+                    return name
+        if r.source == ResidentSource.PROCESS and (
+            r.service in self.tenants
+            or r.service in self.config.tenants
+            or any(o.tenant == r.service for o in self.leases.values() if o.active)
+        ):
+            return r.service
+        return None
 
     def in_use(self, r: Resident) -> bool:
         """A granted lease is using *r* now (its model, or its service for a target with no model)."""
