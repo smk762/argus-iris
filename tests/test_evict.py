@@ -66,6 +66,7 @@ class World:
         self.state = {"xtts": "gpu", "whisper": "gpu"}
         self.ollama_models = [SINGGUARD]
         self.expires: dict[str, str] = {}  # model -> RFC 3339 expiry, as /api/ps reports it
+        self.context: dict[str, int] = {}  # model -> context_length it was loaded with, as /api/ps reports it
         self.comfy_queue = 0
         self.busy: dict[str, int] = {}
         self.busy_on_post: dict[str, int] = {}  # work that arrives between iris's health read and its POST
@@ -104,7 +105,13 @@ class World:
             return httpx.Response(200, json=self._snap("dragon" if "dragon" in url else "morpheus"))
         if url == "http://dragon:11434/api/ps":
             models = [
-                {"name": m, "size": 4000 * MIB, "size_vram": 4000 * MIB, "expires_at": self.expires.get(m)}
+                {
+                    "name": m,
+                    "size": 4000 * MIB,
+                    "size_vram": 4000 * MIB,
+                    "expires_at": self.expires.get(m),
+                    **({"context_length": self.context[m]} if m in self.context else {}),
+                }
                 for m in self.ollama_models
             ]
             return httpx.Response(200, json={"models": models})

@@ -334,12 +334,20 @@ async def evict_resident(
 
 
 async def set_keep_alive(broker: Broker, resident: Resident, keep_alive: str | int) -> None:
-    """Set a loaded Ollama model's keep_alive (``-1`` pins it). Ollama resets the model's timer to this."""
+    """Set a loaded Ollama model's keep_alive (``-1`` pins it). Ollama resets the model's timer to this.
+
+    The request carries the context the model is loaded with: Ollama reloads a model for a request whose ``num_ctx``
+    differs, so a bare call reloaded a model its caller had loaded with a larger context (SingGuard at 16384 on
+    dragon), and the caller's next request reloaded it back, about once a minute while it was pinned.
+    """
     svc = next(s for s in broker.config.services if s.id == resident.service)
+    body: dict = {"model": resident.model, "keep_alive": keep_alive}
+    if ctx := resident.detail.get("context_length"):
+        body["options"] = {"num_ctx": ctx}
     try:
         resp = await broker.client.post(
             f"{svc.base_url}/api/generate",
-            json={"model": resident.model, "keep_alive": keep_alive},
+            json=body,
             headers=svc.headers(),
             timeout=httpx.Timeout(60.0),
         )
