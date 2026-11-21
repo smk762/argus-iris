@@ -68,6 +68,12 @@ services:
   - { id: immich-ml, node: dragon, adapter: external, base_url: "http://dragon:3003", health_path: /ping,
       container: immich_machine_learning, evict_by: stop }
 
+  # argus-lens (its gpu-tenant.yaml resident lens-captioner): /admin/unload frees the captioning model; there is no
+  # evict or wake route (the next caption reloads it). Its container is argus-lens, or <project>-argus-lens-1 when it
+  # runs in a compose project. Lens has its own ARGUS_ADMIN_TOKEN, so it gets its own token_env.
+  - { id: lens, node: morpheus, adapter: argus-http, base_url: "http://morpheus:8100", container: argus-lens,
+      token_env: LENS_ADMIN_TOKEN }
+
 # Admission. "observe" (the default) grants every lease at once and records whether it would have fit; "enforce"
 # queues what does not fit, spills to the next node (the Ollama serving fewer leases first,
 # skipping one that has not pulled the model), and evicts idle residents

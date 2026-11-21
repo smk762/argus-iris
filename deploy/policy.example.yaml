@@ -37,6 +37,9 @@ residents:                         # first matching rule wins; fnmatch patterns
   # the room, and iris starts it again once no lease is active there. Leave enforce off to see "would stop" first.
   - match: { resident: "dragon/immich-ml" }
     enforce: false
+  # argus-lens has no timer of its own unless ARGUS_IDLE_UNLOAD_S is set: a loaded captioner stays for ever.
+  - match: { resident: "morpheus/lens" }
+    idle_kill: 15m
   # Ollama on dragon: with OLLAMA_KEEP_ALIVE=server, iris extends keep_alive until idle-kill.
   - match: { node: dragon, ollama: "*" }
     idle_kill: 15m

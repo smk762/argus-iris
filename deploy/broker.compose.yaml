@@ -23,3 +23,4 @@ services:
       # Tokens the example config's token_env entries name.
       ARGUS_ADMIN_TOKEN: ${ARGUS_ADMIN_TOKEN:-}
       RAG_CHAT_API_KEY: ${RAG_CHAT_API_KEY:-}
+      LENS_ADMIN_TOKEN: ${LENS_ADMIN_TOKEN:-}
