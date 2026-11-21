@@ -254,6 +254,8 @@ class Broker:
         )
 
     def _apply(self, name: str, state: NodeState) -> None:
+        for r in state.residents:
+            r.tenant = self.leases.tenant_of(r)
         self.residency.annotate(state)
         for r in state.residents:
             if r.vram_mb > self.peaks.get(r.id, 0):
