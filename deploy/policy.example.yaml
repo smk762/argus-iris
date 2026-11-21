@@ -22,6 +22,7 @@ residents:                         # first matching rule wins; fnmatch patterns
   - match: { resident: "dragon/xtts" }
     idle_kill: 120s                # GPU -> CPU, kept warm ...
     unload_after: 600s             # ... then unloaded, freeing host RAM (was XTTS_KEEP_ALIVE_CPU)
+    restart_residual_mb: 64        # an unload leaves ~146 MB of CUDA context; only a restart returns it
   - match: { resident: "dragon/tts" }
     idle_kill: 120s
     unload_after: 600s
