@@ -67,10 +67,12 @@ class World:
         self.ollama_models = [SINGGUARD]
         self.expires: dict[str, str] = {}  # model -> RFC 3339 expiry, as /api/ps reports it
         self.context: dict[str, int] = {}  # model -> context_length it was loaded with, as /api/ps reports it
+        self.generate_fails = False
         self.comfy_queue = 0
         self.busy: dict[str, int] = {}
         self.busy_on_post: dict[str, int] = {}  # work that arrives between iris's health read and its POST
         self.residual = {"whisper": 94}  # CUDA context left behind after an unload
+        self.loaded_mb = {"xtts": 2400, "whisper": 1500}  # what /admin/wake loads
         self.loads_on_post: dict[str, int] = {}  # a request reloads the model (MB) just as iris's call lands
         self.frees_memory = True
         self.anon: dict[str, int] = {}  # container -> cgroup anon MB, as the agent reports it
@@ -118,7 +120,14 @@ class World:
             return httpx.Response(200, json={"models": models})
         if url == "http://dragon:11434/api/generate":
             body = json.loads(request.content)
-            if body["keep_alive"] != 0:  # -1 pins; "900s" extends
+            if body["keep_alive"] != 0:  # -1 pins; "900s" extends; either loads a model that is not loaded
+                if self.generate_fails:
+                    return httpx.Response(500, json={"error": "model failed to load"})
+                if body["model"] not in self.ollama_models:
+                    self.ollama_models.append(body["model"])
+                    self.vram["ollama"] += 4000
+                if ctx := body.get("options", {}).get("num_ctx"):
+                    self.context[body["model"]] = ctx
                 self.expires[body["model"]] = "2318-01-01T00:00:00Z" if body["keep_alive"] == -1 else "extended"
                 return httpx.Response(200, json={"done": True})
             self.ollama_models.remove(body["model"])
@@ -134,6 +143,9 @@ class World:
                 active = self.busy.get(name) or self.busy_on_post.get(name)
                 if active:
                     return httpx.Response(409, json={"status": "busy", "active": active})
+                if url.endswith("/admin/wake"):
+                    self.state[name], self.vram[name] = "gpu", self.loaded_mb.get(name, 2400)
+                    return httpx.Response(200, json={"status": "ok", "model_state": "gpu", "unloaded": None})
                 to = "cpu" if url.endswith("/admin/evict") else "unloaded"
                 self.state[name] = to
                 self.vram[name] = self.residual.get(name, 0)

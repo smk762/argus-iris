@@ -14,6 +14,8 @@ windows: []
 
 residents:                         # first matching rule wins; fnmatch patterns
   # SingGuard stays loaded on dragon: keep_alive -1, never evicted (admission honours the pin even unenforced).
+  # Enforced, a pinned resident that drops out anyway (an unload by hand, a restart, an OOM) is loaded again, at the
+  # context it had, once no lease is active on the node and there is room; `restore: false` turns that off.
   - match: { node: dragon, ollama: "hf.co/inclusionAI/SingGuard-4b-GGUF:*" }
     keepalive: always
   # agent-composer's sidecars (#6 table). Their own timers: *_KEEP_ALIVE_GPU / _CPU, INFINITY_IDLE_TIMEOUT.

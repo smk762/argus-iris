@@ -189,6 +189,7 @@ def create_app(
             "polls": broker.polls,
             "leases": {"active": len(broker.leases.active()), "tenants": len(broker.leases.tenants)},
             "agents": agents,
+            "pins_missing": broker.residency.missing_pins(),
         }
 
     @app.get("/nodes", response_model=list[NodeState])

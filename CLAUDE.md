@@ -44,7 +44,10 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
   idle-kill evict, `unload_after` (CPU stage -> unloaded; confirmed by the reply, since only RAM moves), restart
   when unloaded (never merely on the CPU) but holding `restart_residual_mb`, or idle `restart_host_ram_idle` with
   container anon memory (`Resident.host_ram_mb`) over `restart_host_ram_mb` (default: the manifest's
-  `host_ram_restart_mb`); `Broker.residuals` remembers what an
+  `host_ram_restart_mb`); restore (#35): `Residency.pins` remembers pinned residents seen loaded and warms one
+  gone `RESTORE_AFTER_POLLS` polls (Ollama: promptless keep_alive -1 with its old `num_ctx`; argus-http: `warm_path`)
+  only with no lease active/queued on the node and room, backing off on failure or a quick re-drop; `/health`
+  `pins_missing`; `Broker.residuals` remembers what an
   eviction left so it is not repeated), `actions.py` (warm: 409 unless `force` while the node cannot admit `warm_mb` or the most it was seen holding, `Broker.peaks`; agent starts the container, wait for health, call `warm_path`;
   `evict_resident`: adapter route per source, 409 while busy, confirmed by the GPU's NVML free memory rising by half
   the resident's VRAM, not by the service's word; reports `residual_mb`).
