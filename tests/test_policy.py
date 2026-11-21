@@ -305,6 +305,30 @@ async def test_unload_after_frees_the_cpu_stage_too():
     assert broker.residency.actions[("dragon", "unload", "ok")] == 1  # no VRAM moved, and that is not a failure
 
 
+async def test_a_model_loaded_during_an_unload_is_not_written_off_as_its_floor():
+    """dragon/xtts, 2026-11-21: on the CPU at 146 MB, unload sent, and a TTS request loaded it back (1970 MB) during
+    the wait. Recorded as its floor, it read as "unloaded" for good: idle-kill planned nothing, and admission, which
+    spares what is already evicted, refused SingGuard's leases rather than evict it."""
+    dragon, broker = await make(
+        [{"match": {"resident": "dragon/xtts"}, "idle_kill": "30s", "unload_after": "0s", "enforce": True}]
+    )
+    dragon.residual["xtts"] = 146
+    await broker.residency.step()  # GPU -> CPU
+    await broker.poll_once()
+    broker.residency._cooldown.clear()
+    dragon.loads_on_post["xtts"] = 1970
+    await broker.residency.step()
+    assert dragon.calls[-1] == "POST http://dragon:9150/r/xtts/admin/unload"
+    assert "dragon/xtts" not in broker.residuals
+    xtts = next(r for r in broker.residents() if r.id == "dragon/xtts")
+    assert not broker.residency.protected(xtts)  # admission may evict it
+    assert view(broker, "dragon/xtts").next == "evict"  # and idle-kill will, once its cooldown is over
+
+    broker.residuals["dragon/xtts"] = 1970  # a floor recorded before this fix, as on morpheus that day
+    await broker.poll_once()
+    assert "dragon/xtts" not in broker.residuals  # the service says gpu: its word wins
+
+
 # --- host RAM (#20): ComfyUI's grows with use and only a restart returns it --------------------------------------
 
 # The fake world is idle 60 s everywhere, under the 120 s default.

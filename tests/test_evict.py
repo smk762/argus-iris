@@ -71,6 +71,7 @@ class World:
         self.busy: dict[str, int] = {}
         self.busy_on_post: dict[str, int] = {}  # work that arrives between iris's health read and its POST
         self.residual = {"whisper": 94}  # CUDA context left behind after an unload
+        self.loads_on_post: dict[str, int] = {}  # a request reloads the model (MB) just as iris's call lands
         self.frees_memory = True
         self.anon: dict[str, int] = {}  # container -> cgroup anon MB, as the agent reports it
         self.calls: list[str] = []
@@ -136,6 +137,8 @@ class World:
                 to = "cpu" if url.endswith("/admin/evict") else "unloaded"
                 self.state[name] = to
                 self.vram[name] = self.residual.get(name, 0)
+                if name in self.loads_on_post:  # the reply says what the call did; /health then says gpu
+                    self.state[name], self.vram[name] = "gpu", self.loads_on_post.pop(name)
                 return httpx.Response(200, json={"status": "ok", "model_state": to, "unloaded": True})
         if url == "http://morpheus:8188/system_stats":
             return httpx.Response(200, json={"devices": []})

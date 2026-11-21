@@ -52,6 +52,11 @@ COOLDOWN_S = 60.0  # after acting on a resident, leave it this long (a failed ev
 _FREED = frozenset({"unloaded", "cpu"})
 
 
+def on_gpu(r: Resident) -> bool:
+    """The service says its model holds VRAM now (cortex's ``ResidentHealth.on_gpu``). False when it says nothing."""
+    return r.detail.get("model_state") == "gpu"
+
+
 class Residency:
     def __init__(self, broker: Broker, policy: Policy, *, clock=utcnow) -> None:
         self.broker = broker
@@ -68,9 +73,11 @@ class Residency:
         return bool(match and self.policy.kept(match[1], self._clock()))
 
     def evicted(self, r: Resident) -> bool:
-        """Already evicted: holding no more than its last confirmed eviction left behind."""
+        """Already evicted: holding no more than its last eviction left behind, and not saying it has a model on the
+        GPU. The service's own word wins: a residual recorded while a request was loading the model would otherwise
+        hide a loaded model from idle-kill and admission for good."""
         left = self.broker.residuals.get(r.id)
-        return left is not None and r.vram_mb <= left + RESIDUAL_SLACK_MB
+        return left is not None and r.vram_mb <= left + RESIDUAL_SLACK_MB and not on_gpu(r)
 
     def protected(self, r: Resident) -> bool:
         """Admission must not plan to evict *r*: pinned, or already evicted (evicting it again frees nothing)."""
