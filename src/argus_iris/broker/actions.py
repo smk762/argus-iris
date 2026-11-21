@@ -29,6 +29,7 @@ from argus_cortex.gpu_wire import ResidentActionReply, ResidentBusyReply
 from pydantic import BaseModel, ValidationError
 
 from argus_iris.broker.config import ServiceConfig
+from argus_iris.broker.residency import RESIDUAL_SLACK_MB, on_gpu
 from argus_iris.broker.state import Broker
 from argus_iris.models import NodeState, Resident, ResidentSource
 
@@ -320,7 +321,10 @@ async def evict_resident(
     # Without this, ComfyUI at a few hundred MB after /free (which frees nothing more) would be evicted every minute.
     # Not for an Ollama model still listed unconfirmed, though: it is still loaded (a slow or refused unload), and
     # recording its full size would make it count as evicted, so idle-kill would never try it again.
-    if result.confirmed or now is None or resident.source != ResidentSource.OLLAMA:
+    # Nor for anything that grew during the wait or says it is on the GPU: a request loaded the model meanwhile
+    # (dragon/xtts, 2026-11-21: 146 MB on the CPU, unload sent, 1970 MB back on the GPU, written off as its floor).
+    loaded = now is not None and (now.vram_mb > result.before_mb + RESIDUAL_SLACK_MB or on_gpu(now))
+    if not loaded and (result.confirmed or now is None or resident.source != ResidentSource.OLLAMA):
         broker.residuals[resident.id] = result.after_mb
     broker.residency.annotate(broker.nodes[resident.node])  # the policy view now knows it is evicted
     if result.confirmed:
