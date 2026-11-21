@@ -48,7 +48,12 @@ class OllamaAdapter:
                     vram_mb=size_vram // MIB,
                     expires_at=_parse_time(m.get("expires_at")),
                     # size_vram < size: Ollama split the model across GPU and CPU because it did not fit.
-                    detail={"size_mb": size // MIB, "partial_offload": 0 < size_vram < size},
+                    detail={
+                        "size_mb": size // MIB,
+                        "partial_offload": 0 < size_vram < size,
+                        # The context it was loaded with: a keep_alive call must send it back (actions.set_keep_alive).
+                        **({"context_length": int(m["context_length"])} if m.get("context_length") else {}),
+                    },
                 )
             )
         return ServiceReading(up=True, models=models, available=await self._tags(client))

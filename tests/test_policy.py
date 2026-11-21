@@ -184,6 +184,18 @@ async def test_pinned_ollama_model_is_held_at_minus_one_and_spared_by_admission(
     assert broker.residency.pinned(next(r for r in broker.residents() if r.id == rid))
 
 
+async def test_keep_alive_calls_send_back_the_loaded_context():
+    # Ollama reloads a model for a request with another num_ctx: a bare pin reloaded SingGuard (loaded at 16384 by
+    # rag-chat) at the default 4096, and rag-chat's next check reloaded it back, once a minute.
+    dragon, broker = await make([{"match": {"ollama": "*"}, "keepalive": "always", "enforce": True}])
+    dragon.context[SINGGUARD] = 16384
+    await broker.poll_once()
+    await broker.residency.step()
+    assert dragon.calls == [
+        f'POST http://dragon:11434/api/generate {{"model":"{SINGGUARD}","keep_alive":-1,"options":{{"num_ctx":16384}}}}'
+    ]
+
+
 async def test_ollama_keep_alive_is_extended_until_idle_kill():
     dragon, broker = await make([{"match": {"ollama": "*"}, "idle_kill": "10m", "enforce": True}])
     soon = datetime.now(UTC) + timedelta(seconds=60)
