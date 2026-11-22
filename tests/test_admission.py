@@ -511,3 +511,71 @@ async def test_the_broker_labels_residents_with_their_tenant():
     tenants = {r.id: r.tenant for r in broker.residents()}
     assert tenants["dragon/xtts"] == "agent-composer"
     assert tenants["dragon/whisper"] is None
+
+
+# --- the broker's peak for a client that cannot see its own VRAM (#39) -------------------------------------------
+
+
+def release(w: World, rec, peak=None):
+    from argus_cortex.gpu_wire import LeaseRelease
+
+    return w.book.release(rec.lease_id, LeaseRelease(outcome="ok", peak_vram_mb=peak))
+
+
+def test_a_release_without_a_peak_records_the_tenants_process_vram():
+    w, _ = curator_world(1500)
+    rec = w.ask(tenant="argus-curator", vram_mb=512)
+    done = release(w, rec)
+    assert (done.peak_vram_mb, done.peak_source) == (1500, "broker")
+
+
+def test_a_client_peak_wins_over_the_broker_figure():
+    w, _ = curator_world(1500)
+    rec = w.ask(tenant="argus-curator", vram_mb=512)
+    w.book.tick()  # the broker has seen 1500 by now
+    assert (rec.peak_vram_mb, rec.peak_source) == (1500, "broker")
+    done = release(w, rec, peak=900)
+    assert (done.peak_vram_mb, done.peak_source) == (900, "client")
+
+
+def test_the_broker_peak_is_the_most_seen_over_the_lease_not_the_last():
+    w, proc = curator_world(1500)
+    rec = w.ask(tenant="argus-curator", vram_mb=512)
+    w.book.tick()
+    proc.vram_mb = 3200  # the model loaded
+    w.book.tick()
+    proc.vram_mb = 700  # and its arena shrank again before release
+    w.book.tick()
+    assert release(w, rec).peak_vram_mb == 3200
+
+
+def test_a_client_heartbeat_peak_stops_the_broker_filling_in():
+    from argus_cortex.gpu_wire import Heartbeat
+
+    w, proc = curator_world(1500)
+    rec = w.ask(tenant="argus-curator", vram_mb=512)
+    w.book.heartbeat(rec.lease_id, Heartbeat(peak_vram_mb=1100))
+    proc.vram_mb = 5000
+    w.book.tick()
+    done = release(w, rec)
+    assert (done.peak_vram_mb, done.peak_source) == (1100, "client")
+
+
+def test_no_linked_process_and_service_leases_stay_null():
+    w = World()
+    rec = w.ask(tenant="argus-darkroom", vram_mb=512)  # in-process, but no process of its own on the node
+    w.book.tick()
+    assert (release(w, rec).peak_vram_mb, rec.peak_source) == (None, None)
+    w2, _ = curator_world(6000)
+    w2.nodes["dragon"].ledger.admissible_mb = 8000
+    svc = w2.ask(tenant="argus-curator", target="ollama:qwen3:8b", vram_mb=512)
+    w2.book.tick()
+    assert release(w2, svc).peak_vram_mb is None  # the work ran in Ollama, not in curator's process
+
+
+def test_concurrent_leases_of_one_tenant_each_show_the_process_total():
+    w, _ = curator_world(3000)
+    a = w.ask(tenant="argus-curator", vram_mb=512)
+    b = w.ask(tenant="argus-curator", vram_mb=512)
+    w.book.tick()
+    assert (a.peak_vram_mb, b.peak_vram_mb) == (3000, 3000)  # the whole, not a share: said so in peak_source's doc
