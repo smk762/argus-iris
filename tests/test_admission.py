@@ -121,7 +121,15 @@ def test_evicts_idle_residents_least_recently_used_first_then_grants():
     w.book.tick()
     assert len(w.evicted) == 1  # not planned twice while it runs
 
-    w.nodes["dragon"] = node("dragon", 4500, [res("dragon", "xtts", 2400, idle=300)])
+    # After the plan: old:7b's 3000 MB freed, nomic-embed-text still resident, exactly the 4000 MB asked for.
+    w.nodes["dragon"] = node(
+        "dragon",
+        4000,
+        [
+            res("dragon", "xtts", 2400, idle=300),
+            res("dragon", "ollama-dragon", 500, model="nomic-embed-text:latest", idle=1200),
+        ],
+    )
     w.book.evictions_done(rec.lease_id, failed=[])
     assert (rec.state, rec.node) == ("granted", "dragon")
     assert w.book.evictions[("dragon", "confirmed")] == 1
