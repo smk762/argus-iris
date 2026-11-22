@@ -348,8 +348,11 @@ def _hold(w: World, holder, seconds: float, *, waiter=None, beat=None) -> None:
     """Advance *seconds*: the holder's keepalive beats and the waiter keeps polling, as live clients would."""
     from argus_cortex.gpu_wire import Heartbeat
 
-    for _ in range(int(seconds // 20)):
-        w.now += timedelta(seconds=20)
+    left = seconds
+    while left > 0:
+        step = min(20, left)  # all of it: a remainder under one beat still moves the clock
+        left -= step
+        w.now += timedelta(seconds=step)
         w.book.heartbeat(holder.lease_id, beat or Heartbeat())
         if waiter is not None and waiter.state == "queued":
             w.ask(target=waiter.target, vram_mb=waiter.vram_mb, request_id=waiter.request_id)  # a poll
