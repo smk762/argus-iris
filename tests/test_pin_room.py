@@ -214,3 +214,17 @@ def test_residents_carry_the_most_vram_seen() -> None:
     tts = next(r for r in broker.residents() if r.id == "dragon/tts")
     assert (tts.vram_mb, tts.peak_mb) == (600, 3400)
     assert next(r for r in broker.residents() if r.id == "dragon/xtts").peak_mb is None  # never held anything
+
+
+def test_need_is_the_larger_of_warm_mb_and_the_peak_and_an_overrun_is_logged_once(capsys) -> None:
+    broker = Broker(CONFIG)  # echo-xtts declares warm_mb 2000
+    morpheus = lambda vram: node("morpheus", residents=[argus("morpheus", "echo-xtts", vram)])  # noqa: E731
+    broker._apply("morpheus", morpheus(1800))
+    svc = next(s for s in broker.nodes["morpheus"].services if s.id == "echo-xtts")
+    assert svc.need_mb == 2000 and "resident_over_warm_mb" not in capsys.readouterr().out
+    broker._apply("morpheus", morpheus(2600))  # a second model loaded
+    svc = next(s for s in broker.nodes["morpheus"].services if s.id == "echo-xtts")
+    assert svc.need_mb == 2600
+    assert capsys.readouterr().out.count("resident_over_warm_mb") == 1
+    broker._apply("morpheus", morpheus(2900))
+    assert "resident_over_warm_mb" not in capsys.readouterr().out  # once per resident

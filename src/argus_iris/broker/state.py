@@ -190,8 +190,8 @@ def room_for_services(
 
     *held* maps each such resident (pinned, a dropped pin awaiting restore included; a process iris has no adapter
     for; what an unloaded service keeps) to it as it holds the most, and *pinned* names the pinned ones. A service's
-    need is its ``warm_mb``, else the most iris has seen it hold; an Ollama service has none unless set, since what it
-    takes depends on the model. What the service holds itself counts toward its need, not against its room. Pure.
+    need is the larger of its ``warm_mb`` and the most iris has seen it hold; an Ollama service's is its ``warm_mb``
+    only (unset: none), since what it takes depends on the model. What the service holds itself counts toward its need, not against its room. Pure.
     """
     if state.ledger is None:
         return []
@@ -206,10 +206,10 @@ def room_for_services(
         svc = by_id.get(st.id)
         if svc is None:
             continue
-        if svc.warm_mb is not None:
-            st.need_mb = svc.warm_mb
-        elif svc.adapter != "ollama":
-            st.need_mb = peaks.get(f"{state.name}/{svc.id}")
+        seen = None if svc.adapter == "ollama" else peaks.get(f"{state.name}/{svc.id}")
+        # The larger of the two: a warm_mb that understates what the service really takes (a second model loaded,
+        # say) must not hide that it no longer fits.
+        st.need_mb = max(svc.warm_mb or 0, seen or 0) or None
         if not st.need_mb:
             continue
         st.room_mb = max(0, base - sum(r.vram_mb for r in held.values() if r.service != svc.id))
@@ -254,6 +254,7 @@ class Broker:
             name: NodeState(name=name, agent_url=cfg.agent_url, reachable=False) for name, cfg in config.nodes.items()
         }
         self._last_seen: dict[str, object] = {}
+        self._over_warm: set[str] = set()  # residents warned for holding more than their service's warm_mb
         self._crowded: dict[str, set[str]] = {}  # node -> services flagged crowded out
         self._fingerprints: dict[str, dict] = {}
         self._subscribers: set[asyncio.Queue[Event]] = set()
@@ -303,6 +304,7 @@ class Broker:
         for r in state.residents:
             if r.vram_mb > self.peaks.get(r.id, 0):
                 self.peaks[r.id] = r.vram_mb
+                self._check_warm_mb(r)
             r.peak_mb = self.peaks.get(r.id)
         self._check_room(name, state)
         was = self.nodes.get(name)
@@ -313,6 +315,24 @@ class Broker:
         if self._fingerprints.get(name) != fingerprint:
             self._fingerprints[name] = fingerprint
             self._publish(("node", state))
+
+    def _check_warm_mb(self, r: Resident) -> None:
+        """Warn, once per resident, when it holds more than its service's configured ``warm_mb``: the figure is out of
+        date (a second model loaded, a bigger context), and the tenant manifest it came from likely is too."""
+        if r.id in self._over_warm or r.id != f"{r.node}/{r.service}":
+            return  # warned already, or an Ollama model: warm_mb is not one model's size
+        svc = next((s for s in self.config.services_on(r.node) if s.id == r.service), None)
+        if svc is None or svc.warm_mb is None or r.vram_mb <= svc.warm_mb:
+            return
+        self._over_warm.add(r.id)
+        log.warning(
+            "resident_over_warm_mb",
+            resident=r.id,
+            vram_mb=r.vram_mb,
+            warm_mb=svc.warm_mb,
+            model_state=r.detail.get("model_state"),
+            container=svc.container,
+        )
 
     def _held_on(self, state: NodeState) -> tuple[dict[str, Resident], set[str]]:
         """What admission can never free on *state*'s node, each resident as it holds the most, and which are pins.

@@ -221,7 +221,7 @@ that ignores it is not killed, but from the first `yield_requested` iris stops e
 **Room that never comes back** (#40). Each poll, iris sums what admission can never free on a node: pinned residents
 (a pin that dropped out and is due to be restored included), processes it has no adapter for and no tenant owns
 (Frigate), externals it may not stop, and the context an unloaded, CPU-parked or failed service keeps. A service whose
-need (`warm_mb`, else the most it has been seen holding) exceeds what is left beside that is `crowded_out`: on
+need (the larger of `warm_mb` and the most it has been seen holding; a resident over its `warm_mb` logs `resident_over_warm_mb` once) exceeds what is left beside that is `crowded_out`: on
 `/health` (`crowded_out`), the node's services (`need_mb`, `room_mb`), `iris_service_crowded_out`, the dashboard, and a
 `service_crowded_out` log naming the biggest holders. It is a report, not an action: the operator moves a pin, adds a
 node for the target (`serves`), or lets `restart_residual_mb` return a residue.
