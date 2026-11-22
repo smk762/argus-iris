@@ -107,8 +107,7 @@ admission_min_idle_s: 60          # before a lower-class resident is evicted
 admission_same_class_idle_s: 300  # idle and loaded this long before a same-class one is (no ping-pong)
 lease_stall_s: 1800              # granted, heartbeating, no GPU activity this long: stalled (asked to yield if blocking)
 lease_stall_reclaim: false       # true: also end a stalled lease that blocks the queue, after lease_stall_s / 2 more
-pinned:                       # resident ids (fnmatch) admission never evicts
-  - "dragon/ollama-dragon/hf.co/inclusionAI/SingGuard-*"
+pinned: []                    # resident ids (fnmatch) admission never evicts, e.g. "jarrah/ollama-jarrah/qwen3:8b"
 
 # Browser origins (the Studio page) allowed to make state-changing requests.
 trusted_origins: []

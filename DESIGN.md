@@ -206,9 +206,10 @@ that ignores it is not killed, but from the first `yield_requested` iris stops e
 **Placement.** A lease names a target, not a host:
 
 - `comfyui`: the node(s) running ComfyUI (morpheus).
-- `ollama:<model>`: dragon first, spill to jarrah when dragon cannot admit it and the model fits jarrah. With
-  SingGuard pinned on dragon (about 5.8 GiB of 8 GiB, plus Infinity and nomic-embed-text), dragon has about 1.75 GiB
-  left, so in practice any general model larger than an embedder lands on jarrah. Where both fit, the Ollama serving
+- `ollama:<model>`: dragon first, spill to jarrah when dragon cannot admit it and the model fits jarrah. SingGuard was
+  pinned on dragon (about 5.3 GiB of 8 GiB) until 2026-11-22, which sent any general model larger than an embedder to
+  jarrah and crowded out the voice engines (#40); the guard now runs on morpheus (argus-retina), and dragon's copy is
+  idle-killed after a minute. Where both fit, the Ollama serving
   fewer granted leases goes first (then the one with the model loaded), so concurrent jobs spread over the two; an
   Ollama whose `/api/tags` lacks the model is skipped unless none has it. A lease that fits nowhere waits on the node
   its running leases would free.
@@ -247,10 +248,8 @@ windows:
     node: morpheus
     class: background
 residents:                         # first matching rule wins
-  - match: { node: dragon, ollama: "hf.co/inclusionAI/SingGuard-4b-GGUF:*" }
-    keepalive: always              # pinned: never evicted
   - match: { node: jarrah, ollama: "qwen3:8b" }
-    keepalive: { cron: "0 8 * * 1-5", duration: 10h }   # does not fit dragon beside SingGuard
+    keepalive: { cron: "0 8 * * 1-5", duration: 10h }   # pinned in working hours: never evicted then
     idle_kill: 15m
   - match: { node: jarrah, ollama: "*" }
     idle_kill: 5m                  # one model fills the card; keep it moving
@@ -343,7 +342,7 @@ The client lives in cortex so every service gets it through the existing `GpuCoo
 | argus-lens, argus-curator | No code change: `ARGUS_GPU_COORDINATOR=broker`. |
 | argus-proof | `batch` on `comfyui` or in-process with constraints. |
 | argus-forge | Exclusive whole-card `background` lease on morpheus, inside a window. |
-| agent-composer, SingGuard | SingGuard is an Ollama model (`SingGuard-4b` Q4_K_M, about 5.8 GiB), called through rag-chat on :9150; it is a pinned resident on dragon. Other requests stop sending `keep_alive=15m` once iris owns residency. agent-composer has one `OLLAMA_URL` and no host routing, so spilling its work to jarrah needs it to call the grant's `base_url` through the cortex client. |
+| agent-composer, SingGuard | SingGuard checks go through rag-chat on :9150 to argus-retina's SingGuard server on morpheus (agent-composer#77), which takes its own leases. Dragon's Ollama copy (`SingGuard-4b` Q4_K_M, about 5.3 GiB) was a pinned resident until 2026-11-22 and is now idle-killed; jarrah has it pulled too. Other requests stop sending `keep_alive=15m` once iris owns residency. agent-composer has one `OLLAMA_URL` and no host routing, so spilling its work to jarrah needs it to call the grant's `base_url` through the cortex client. |
 | ai-code-auditor | Was a gothmog capacity-token client: moves to an `ollama:<model>` lease. |
 | voluptas, mithrandir, Immich | Observed first; iris takes over the idle policy (see rollout). |
 

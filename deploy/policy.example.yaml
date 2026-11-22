@@ -13,11 +13,11 @@ windows: []
 #    class: batch
 
 residents:                         # first matching rule wins; fnmatch patterns
-  # SingGuard stays loaded on dragon: keep_alive -1, never evicted (admission honours the pin even unenforced).
-  # Enforced, a pinned resident that drops out anyway (an unload by hand, a restart, an OOM) is loaded again, at the
-  # context it had, once no lease is active on the node and there is room; `restore: false` turns that off.
+  # SingGuard on dragon's Ollama: no longer pinned. The suite's guard checks go to argus-retina's SingGuard on morpheus
+  # (agent-composer#77), and jarrah has the model pulled for an ollama:SingGuard lease that does not fit dragon. Its
+  # 5.3 GB pin crowded XTTS and Qwen off the 4060 (#40), so anything that still loads it goes after a minute idle.
   - match: { node: dragon, ollama: "hf.co/inclusionAI/SingGuard-4b-GGUF:*" }
-    keepalive: always
+    idle_kill: 60s
   # agent-composer's sidecars (#6 table). Their own timers: *_KEEP_ALIVE_GPU / _CPU, INFINITY_IDLE_TIMEOUT.
   # Hand over by setting only *_KEEP_ALIVE_GPU=-1. With it at -1 the sidecar never runs its CPU stage either,
   # so iris owns that too: unload_after = the old *_KEEP_ALIVE_CPU.
@@ -47,6 +47,11 @@ residents:                         # first matching rule wins; fnmatch patterns
   # Ollama on dragon: with OLLAMA_KEEP_ALIVE=server, iris extends keep_alive until idle-kill.
   - match: { node: dragon, ollama: "*" }
     idle_kill: 15m
+  # jarrah: mithrandir keeps qwen3:8b warm on purpose. A pin: keep_alive -1, never evicted (admission honours it even
+  # unenforced). Enforced, a pinned resident that drops out anyway (an unload by hand, a restart, an OOM) is loaded
+  # again, at the context it had, once no lease is active on the node and there is room; `restore: false` turns that off.
+  - match: { node: jarrah, ollama: "qwen3:8b" }
+    keepalive: always
   # jarrah: one model fills the card; keep it moving.
   - match: { node: jarrah, ollama: "*" }
     idle_kill: 5m
