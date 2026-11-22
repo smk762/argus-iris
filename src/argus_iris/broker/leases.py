@@ -50,6 +50,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Literal
 
 import structlog
 from argus_cortex.gpu_wire import (
@@ -117,6 +118,11 @@ class LeaseRecord(BaseModel):
     resumed: bool = False
     heartbeats: int = 0
     peak_vram_mb: int | None = None
+    # Where peak_vram_mb came from (#39). "client": the caller reported it (heartbeat or release), and that wins.
+    # "broker": the caller sent none, so iris filled it, for an in-process lease, with the most its tenant's own
+    # process residents held on the node while the lease was granted. That is the process total: with several
+    # processes or several concurrent leases of one tenant on the node, each lease shows the whole, not a share.
+    peak_source: Literal["client", "broker"] | None = None
     progress: float | None = (
         None  # 0-1, from the caller's heartbeat (cortex lease_version 1.1); a change counts as activity
     )
@@ -708,7 +714,7 @@ class LeaseBook:
         now = self._clock()
         shown = (rec.peak_vram_mb, rec.progress, rec.stage)
         if hb.peak_vram_mb is not None:
-            rec.peak_vram_mb = max(rec.peak_vram_mb or 0, hb.peak_vram_mb)
+            _client_peak(rec, hb.peak_vram_mb)
         # getattr: cortex before lease_version 1.1 has no progress on Heartbeat.
         if (progress := getattr(hb, "progress", None)) is not None:
             rec.progress = progress
@@ -740,7 +746,9 @@ class LeaseBook:
         if rec is None:
             return None
         if rel.peak_vram_mb is not None:
-            rec.peak_vram_mb = max(rec.peak_vram_mb or 0, rel.peak_vram_mb)
+            _client_peak(rec, rel.peak_vram_mb)
+        elif rec.state == "granted":
+            self._sample_own(rec)  # the last poll's figure, in case the lease was shorter than a tick
         if rec.active:
             rec.outcome, rec.detail = rel.outcome, rel.detail
             reason = "cancelled while queued" if rec.state == "queued" else None
@@ -766,12 +774,33 @@ class LeaseBook:
                 self._end(rec, "expired", now, reason=why)
             elif rec.state == "granted":
                 self._watch(rec, now)
+                if rec.state == "granted" and self._sample_own(rec) and self._on_change is not None:
+                    self._on_change(rec)  # the dashboard only, like a heartbeat's figures
             elif not rec.active and rec.ended_at and (now - rec.ended_at).total_seconds() > RETAIN_S:
                 self._forget(rec)
         for lid, when in list(self._reclaimed.items()):
             if (now - when).total_seconds() > 24 * 3600:
                 del self._reclaimed[lid]
         self._serve_queue(now)
+
+    # --- footprint ---------------------------------------------------------------------------------------------
+
+    def _sample_own(self, rec: LeaseRecord) -> bool:
+        """Raise a granted in-process lease's broker peak to what its tenant's own processes hold now (#39).
+
+        A containerised client cannot read its own VRAM (NVML lists host PIDs), so iris, which sees them, fills in.
+        Never over a client figure. True when the figure changed.
+        """
+        if rec.target != IN_PROCESS or rec.node is None or rec.peak_source == "client":
+            return False
+        state = self._nodes().get(rec.node)
+        if state is None or not state.reachable:
+            return False
+        own = sum(r.vram_mb for r in state.residents if r.source == ResidentSource.PROCESS and r.tenant == rec.tenant)
+        if not own or own <= (rec.peak_vram_mb or 0):
+            return False
+        rec.peak_vram_mb, rec.peak_source = own, "broker"
+        return True
 
     # --- stalls --------------------------------------------------------------------------------------------------
 
@@ -853,6 +882,7 @@ class LeaseBook:
             outcome=rec.outcome,
             held_s=held,
             peak_vram_mb=rec.peak_vram_mb,
+            peak_source=rec.peak_source,
             reason=rec.reason,
         )
         self._changed(rec)
@@ -929,6 +959,14 @@ class LeaseBook:
 
     def active(self, node: str | None = None) -> list[LeaseRecord]:
         return [r for r in self.leases.values() if r.active and (node is None or r.node == node)]
+
+
+def _client_peak(rec: LeaseRecord, mb: int) -> None:
+    """Record a caller's own peak (#39): it replaces a broker estimate, and only grows after that."""
+    if rec.peak_source != "client":
+        rec.peak_vram_mb, rec.peak_source = mb, "client"
+    else:
+        rec.peak_vram_mb = max(rec.peak_vram_mb or 0, mb)
 
 
 def _merge(base: GpuConstraints, over: GpuConstraints) -> GpuConstraints:

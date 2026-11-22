@@ -294,7 +294,9 @@ function renderLeases(name) {
     // Size: weights the service keeps after the lease vs the working set held only while it runs, and what the
     // caller says it really peaked at (heartbeats), so a manifest that over- or under-asks shows.
     const split = l.model_mb ? `${gb(l.model_mb)} model · ${gb(l.vram_mb - l.model_mb)} work` : null;
-    const peak = l.peak_vram_mb != null ? `peak ${gb(l.peak_vram_mb)}` : null;
+    // peak_source "broker": the caller could not say (a container cannot see its host PID), so iris filled in what its
+    // tenant's own processes held on the node during the lease: the process total, shared by concurrent leases.
+    const peak = l.peak_vram_mb != null ? `peak ${gb(l.peak_vram_mb)}${l.peak_source === "broker" ? " (seen by iris)" : ""}` : null;
     return el("tr", {},
       el("td", {}, `${l.tenant} · `, el("span", { class: "meta", text: l.kind }),
         l.caller ? el("span", { class: "svc-err", text: l.caller, title: l.caller }) : null),
