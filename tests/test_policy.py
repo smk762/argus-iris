@@ -69,6 +69,18 @@ def test_windows_open_across_midnight_in_the_policy_zone():
     assert p.window_class("ai-code-auditor", "ollama:qwen3:8b", None, at + timedelta(hours=3)) is None
 
 
+def test_windows_last_their_elapsed_duration_across_dst():
+    la = Policy.model_validate({"timezone": "America/Los_Angeles"}).zone
+    open_at = [
+        # Autumn (clocks back at 02:00 PDT on 2026-11-01): opened 00:30 PDT, so an hour later (01:30 PDT) it closed.
+        # At 01:15 PST, 1h45m after it opened, the wall clock says only 45 minutes.
+        Cron("30 0 * * *").open_since(datetime(2026, 11, 1, 9, 15, tzinfo=UTC).astimezone(la), 3600),
+        # Spring (clocks forward at 02:00 PST on 2026-03-08): opened 01:30 PST, 45 minutes before 03:15 PDT.
+        Cron("30 1 * * *").open_since(datetime(2026, 3, 8, 10, 15, tzinfo=UTC).astimezone(la), 3600),
+    ]
+    assert open_at == [None, datetime(2026, 3, 8, 9, 30, tzinfo=UTC)]
+
+
 def test_node_scoped_window_does_not_match_a_lease_with_no_node():
     p = Policy.model_validate(
         {
@@ -90,7 +102,11 @@ def test_node_scoped_window_does_not_match_a_lease_with_no_node():
     assert p.window_class("t", "ollama:x", None, at) is None  # unplaced: may land off dragon
 
 
-@pytest.mark.parametrize("bad", [-5, float("nan"), float("inf"), ".inf", "9" * 400, "-5s"])
+@pytest.mark.parametrize(
+    "bad",
+    [-5, float("nan"), float("inf"), ".inf", "9" * 400, "-5s", 10**400],
+    ids=["negative", "nan", "inf", "yaml-inf", "long-string", "negative-s", "huge-int"],
+)
 def test_durations_must_be_finite_and_not_negative(bad):
     with pytest.raises(ValueError):
         parse_duration(bad)

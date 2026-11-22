@@ -40,7 +40,7 @@ import fnmatch
 import math
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -58,7 +58,10 @@ _UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400, None: 1}
 def parse_duration(value: object) -> float:
     """``90``, ``"90s"``, ``"15m"``, ``"5h"``, ``"1.5d"`` -> seconds."""
     if isinstance(value, int | float) and not isinstance(value, bool):
-        seconds = float(value)
+        try:
+            seconds = float(value)
+        except OverflowError:  # an int too big for a float: YAML loads a long unquoted digit string as one
+            raise ValueError(f"not a duration: {value!r} (must be finite and not negative)") from None
     else:
         m = _DURATION.match(str(value))
         if not m:
@@ -116,11 +119,16 @@ class Cron:
 
     def open_since(self, now: datetime, duration_s: float) -> datetime | None:
         """The start of a window of *duration_s* open at *now* (in *now*'s zone), or None."""
-        t = now.replace(second=0, microsecond=0)
-        earliest = now - timedelta(seconds=duration_s)
+        # Step back in UTC: aware datetimes in one zone subtract and compare by wall clock, which a DST change moves
+        # (a window an hour too long in the autumn, cut short in the spring). Each minute is matched in *now*'s zone.
+        zone = now.tzinfo
+        start = now.astimezone(UTC) if zone else now
+        t = start.replace(second=0, microsecond=0)
+        earliest = start - timedelta(seconds=duration_s)
         while t > earliest:
-            if self.matches(t):
-                return t
+            local = t.astimezone(zone) if zone else t
+            if self.matches(local):
+                return local
             t -= timedelta(minutes=1)
         return None
 
