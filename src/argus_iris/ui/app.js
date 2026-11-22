@@ -409,6 +409,20 @@ document.addEventListener("focusout", () => (tip.hidden = true));
 window.addEventListener("dh-theme-change", () => requestAnimationFrame(() => inkFor(document)));
 window.addEventListener("resize", () => { for (const b of document.querySelectorAll(".seg-bar")) fitLabels(b); });
 
+// The browser retries a dropped stream by itself, but gives up for good (CLOSED) on an answer that is not an event
+// stream, such as a proxy's 502 while the broker restarts: then open a new one, backing off up to 30 s.
+function connectEvents(setLive, handlers, delay = 1000) {
+  const es = new EventSource(api("events"));
+  for (const [name, fn] of Object.entries(handlers)) es.addEventListener(name, fn);
+  es.addEventListener("open", () => { delay = 1000; });
+  es.addEventListener("error", () => {
+    if (es.readyState !== EventSource.CLOSED) return setLive("warn", "reconnecting");
+    es.close();
+    setLive("bad", `disconnected: retrying in ${Math.round(delay / 1000)}s`);
+    setTimeout(() => connectEvents(setLive, handlers, Math.min(delay * 2, 30000)), delay);
+  });
+}
+
 async function boot() {
   try {
     const [h, c] = await Promise.all([fetch(api("health")).then((r) => r.json()), fetch(api("config")).then((r) => r.json())]);
@@ -421,29 +435,29 @@ async function boot() {
   }
   const live = $("#live");
   const setLive = (state, text) => { live.dataset.state = state; live.lastElementChild.textContent = text; };
-  const es = new EventSource(api("events"));
-  es.addEventListener("open", () => {
-    setLive("ok", "live");
-    // The stream resends every active lease on connect; drop what we had so leases that ended meanwhile go.
-    const had = new Set([...leases.values()].map((l) => l.node));
-    leases.clear();
-    for (const name of had) if (name) renderLeases(name);
-  });
-  es.addEventListener("lease", (e) => {
-    const l = JSON.parse(e.data);
-    const was = leases.get(l.lease_id);
-    if (l.state === "queued" || l.state === "granted") leases.set(l.lease_id, l);
-    else leases.delete(l.lease_id);
-    if (was?.node && was.node !== l.node) renderLeases(was.node);
-    if (l.node) renderLeases(l.node);
-  });
-  es.addEventListener("error", () => setLive(es.readyState === EventSource.CLOSED ? "bad" : "warn", "reconnecting"));
-  es.addEventListener("node", (e) => {
-    const state = JSON.parse(e.data);
-    if (!order.includes(state.name)) order.push(state.name);
-    nodes.set(state.name, state);
-    renderNode(state);
-    renderAgents();
+  connectEvents(setLive, {
+    open: () => {
+      setLive("ok", "live");
+      // The stream resends every active lease on connect; drop what we had so leases that ended meanwhile go.
+      const had = new Set([...leases.values()].map((l) => l.node));
+      leases.clear();
+      for (const name of had) if (name) renderLeases(name);
+    },
+    lease: (e) => {
+      const l = JSON.parse(e.data);
+      const was = leases.get(l.lease_id);
+      if (l.state === "queued" || l.state === "granted") leases.set(l.lease_id, l);
+      else leases.delete(l.lease_id);
+      if (was?.node && was.node !== l.node) renderLeases(was.node);
+      if (l.node) renderLeases(l.node);
+    },
+    node: (e) => {
+      const state = JSON.parse(e.data);
+      if (!order.includes(state.name)) order.push(state.name);
+      nodes.set(state.name, state);
+      renderNode(state);
+      renderAgents();
+    },
   });
 }
 boot();
