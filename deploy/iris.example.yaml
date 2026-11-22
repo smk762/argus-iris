@@ -14,7 +14,9 @@ nodes:
     agent_url: http://jarrah:9110
 
 # Services that hold residents. `container` matches the agent's GPU processes to the service; without it the
-# service's VRAM shows up as an unclaimed "process" resident instead.
+# service's VRAM shows up as an unclaimed "process" resident instead. A lease target names a service by its id, its
+# adapter, or a name in its `serves` list. `warm_mb` (else the most iris has seen it hold) is what it needs: iris flags
+# it `crowded_out` when what the node can never free (pins, unmanaged processes, unloaded residues) leaves less.
 services:
   - id: comfyui
     node: morpheus
@@ -61,6 +63,12 @@ services:
       base_url: "http://dragon:9150/api/runtime/residents/modernbert", token_env: RAG_CHAT_API_KEY }
   - { id: infinity, node: dragon, adapter: argus-http, container: infinity, warm_path: /admin/wake,
       base_url: "http://dragon:9150/api/runtime/residents/infinity", token_env: RAG_CHAT_API_KEY }
+
+  # argus-echo's XTTS-v2 on morpheus (same studio speakers as dragon's xtts). `serves: [xtts]` makes it a second home
+  # for target `xtts` (#40): dragon's sidecar comes first in config order, and a lease spills here when dragon is
+  # down or, under admission: enforce, has no room. The grant's base_url tells the caller which one to call.
+  - { id: echo-xtts, node: morpheus, adapter: argus-http, base_url: "http://morpheus:8141", container: argus-echo-xtts,
+      serves: [xtts], warm_path: /admin/wake, evict_path: /admin/evict, warm_mb: 2000, token_env: ARGUS_ADMIN_TOKEN }
 
   # Immich's ML server (external: no resident contract, GET /ping answers "pong"). Its VRAM is attributed through
   # the container; evict_by: stop lets iris stop it (Immich falls back to its CPU ML on jarrah) once a policy rule

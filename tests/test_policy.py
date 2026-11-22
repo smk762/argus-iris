@@ -223,6 +223,19 @@ async def test_unloaded_but_holding_a_context_is_restarted(monkeypatch):
     assert not any(r.id == "dragon/whisper" for r in broker.residents())  # the 94 MB came back
 
 
+async def test_a_failed_load_holding_memory_is_restarted(monkeypatch):
+    monkeypatch.setenv("IRIS_AGENT_TOKEN", "agent-tok")
+    dragon, broker = await make(
+        [{"match": {"resident": "dragon/whisper"}, "idle_kill": "30s", "restart_residual_mb": 64, "enforce": True}]
+    )
+    dragon.state["whisper"], dragon.vram["whisper"] = "error", 1350  # dragon/tts after an out-of-memory load (#40)
+    await broker.poll_once()
+    v = view(broker, "dragon/whisper")
+    assert (v.next, v.note) == ("restart", "failed to load but holding 1350 MB: restart whisper")
+    await broker.residency.step()
+    assert dragon.calls == ["POST http://dragon:9110/containers/whisper/restart"]
+
+
 async def test_without_a_threshold_an_unloaded_resident_is_just_reported():
     dragon, broker = await make([{"match": {"resident": "dragon/whisper"}, "idle_kill": "30s", "enforce": True}])
     dragon.state["whisper"], dragon.vram["whisper"] = "unloaded", 94

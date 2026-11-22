@@ -28,6 +28,7 @@ residents:                         # first matching rule wins; fnmatch patterns
   - match: { resident: "dragon/tts" }
     idle_kill: 120s
     unload_after: 600s
+    restart_residual_mb: 64        # an unload, or a load that failed for want of room, can leave ~1.3 GB (#40)
   - match: { resident: "dragon/whisper" }
     idle_kill: 120s                # no CPU stage: unloaded at once
   - match: { resident: "dragon/modernbert" }

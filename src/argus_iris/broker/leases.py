@@ -267,7 +267,7 @@ def candidates(
         return [Candidate(n, config.nodes[n].gpu) for n in names], None
 
     name = target_service(rec.target)
-    services = [s for s in config.services if name in (s.id, s.adapter)]
+    services = [s for s in config.services if s.answers(name)]
     services = [s for s in services if (not wanted or s.node == wanted) and _meets(nodes.get(s.node), constraints)]
     if not services:
         return [], f"no configured service serves {rec.target}" + (f" on {wanted}" if wanted else "")
@@ -621,7 +621,7 @@ class LeaseBook:
             s.id
             for o in here
             for s in self.config.services_on(where.node)
-            if target_service(o.target) in (s.id, s.adapter)
+            if s.id == self._services.get(o.lease_id) or s.answers(target_service(o.target))
         }
         wanted = _model_key(target_model(rec.target))
         mine = _rank(rec.priority)

@@ -136,6 +136,10 @@ class ServiceState(BaseModel):
     queue_running: int | None = None
     queue_pending: int | None = None
     available: list[str] | None = None  # models it has pulled (Ollama); None when it cannot say
+    need_mb: int | None = None  # VRAM it takes warm: its configured warm_mb, else the most iris has seen it hold
+    room_mb: int | None = None  # the most it can get beside what the node can never free (NodeLedger.held_mb)
+    # need_mb > room_mb (#40): admission can never make room for it on this node, whatever it evicts.
+    crowded_out: bool = False
 
 
 class NodeLedger(BaseModel):
@@ -148,6 +152,11 @@ class NodeLedger(BaseModel):
     resident_mb: int  # sum of residents iris attributes
     unattributed_mb: int  # NVML used minus resident_mb: other users, CUDA contexts, the display
     admissible_mb: int  # what a new lease could get without evicting anything
+    pinned_mb: int = 0  # held by pinned residents, a dropped pin awaiting restore included
+    # What admission can never free (#40): pinned_mb, processes with no adapter (Frigate), externals iris may not stop,
+    # and the context an unloaded service keeps (only a restart returns it).
+    held_mb: int = 0
+    room_mb: int | None = None  # total - reserve - headroom - held_mb: the most any other service can get
 
 
 class NodeState(BaseModel):

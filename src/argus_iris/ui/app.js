@@ -198,7 +198,8 @@ function renderServices(node, state) {
     const q = s.queue_running == null && s.queue_pending == null ? "–" : `${s.queue_running ?? 0} / ${s.queue_pending ?? 0}`;
     const canWarm = c && (c.warm_path || c.container);
     const status = el("td", {}, el("span", { class: s.up ? "status-up" : "status-down", text: s.up ? "up" : "down" }),
-      s.error ? el("span", { class: "svc-err", text: s.error }) : null);
+      s.error ? el("span", { class: "svc-err", text: s.error }) : null,
+      s.crowded_out ? el("span", { class: "svc-err", title: "pins, unmanaged processes and unloaded residues: nothing iris can evict", text: `needs ${gb(s.need_mb)}, only ${gb(s.room_mb)} can ever be free` }) : null);
     const act = el("td", {});
     if (canWarm) {
       const btn = el("button", { type: "button", class: "btn ghost", text: "Warm", title: warmHint(c) });
