@@ -72,6 +72,17 @@ class _BrokerCollector:
             "iris_service_up", "1 when the service's adapter read succeeded", labels=["node", "service"]
         )
         queue = GaugeMetricFamily("iris_service_queue", "Service queue depth", labels=["node", "service", "state"])
+        pinned = GaugeMetricFamily("iris_node_vram_pinned_mb", "VRAM held by pinned residents", labels=["node"])
+        held = GaugeMetricFamily(
+            "iris_node_vram_held_mb",
+            "VRAM admission can never free: pins, unmanaged processes, residues",
+            labels=["node"],
+        )
+        crowded = GaugeMetricFamily(
+            "iris_service_crowded_out",
+            "1 when what the node can never free leaves less room than the service needs",
+            labels=["node", "service"],
+        )
         for state in self.broker.nodes.values():
             up.add_metric([state.name], 1.0 if state.reachable else 0.0)
             if state.ledger:
@@ -79,6 +90,8 @@ class _BrokerCollector:
                 free.add_metric([state.name], state.ledger.free_mb)
                 admissible.add_metric([state.name], state.ledger.admissible_mb)
                 unattributed.add_metric([state.name], state.ledger.unattributed_mb)
+                pinned.add_metric([state.name], state.ledger.pinned_mb)
+                held.add_metric([state.name], state.ledger.held_mb)
             if state.host:
                 ram.add_metric([state.name], state.host.available_mb)
             for r in state.residents:
@@ -88,6 +101,8 @@ class _BrokerCollector:
                     ridle.add_metric(labels, r.idle_s)
             for s in state.services:
                 svc_up.add_metric([s.node, s.id], 1.0 if s.up else 0.0)
+                if s.need_mb:
+                    crowded.add_metric([s.node, s.id], 1.0 if s.crowded_out else 0.0)
                 if s.queue_running is not None:
                     queue.add_metric([s.node, s.id, "running"], s.queue_running)
                 if s.queue_pending is not None:
@@ -149,7 +164,7 @@ class _BrokerCollector:
             residency.add_metric([node, action, outcome], n)
         tenants = GaugeMetricFamily("iris_tenants", "Tenants that registered a manifest")
         tenants.add_metric([], len(self.broker.leases.tenants))
-        yield from (up, total, free, admissible, unattributed, ram, rvram, ridle, svc_up, queue)
+        yield from (up, total, free, admissible, unattributed, ram, pinned, held, rvram, ridle, svc_up, queue, crowded)
         yield from (leases, lease_mb, unfit, stalled, ended, evictions, residency, tenants)
 
 
@@ -190,6 +205,7 @@ def create_app(
             "leases": {"active": len(broker.leases.active()), "tenants": len(broker.leases.tenants)},
             "agents": agents,
             "pins_missing": broker.residency.missing_pins(),
+            "crowded_out": broker.crowded(),
         }
 
     @app.get("/nodes", response_model=list[NodeState])

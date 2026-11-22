@@ -44,6 +44,9 @@ class ServiceConfig(BaseModel):
     # is attributed through `container` like any other.
     adapter: Literal["comfyui", "ollama", "argus-http", "external"]
     base_url: str
+    # More lease target names this service answers (#40), beside its id and adapter: ``serves: [xtts]`` lets a lease
+    # for target ``xtts`` be placed on it too, so one target can have a service on each of several nodes.
+    serves: list[str] = Field(default_factory=list)
     # Container name on the node, to match the agent's GPU processes to this service (and, later, to warm it).
     container: str | None = None
     # argus-http lifecycle routes, named as in argus-cortex's TenantResident (the contract of voluptas#22 and
@@ -69,6 +72,10 @@ class ServiceConfig(BaseModel):
         if self.evict_by and (self.adapter != "external" or not self.container):
             raise ValueError(f"{self.id}: evict_by needs adapter: external and a container")
         return self
+
+    def answers(self, target: str | None) -> bool:
+        """A lease for service target *target* may be placed on this service."""
+        return target is not None and target in (self.id, self.adapter, *self.serves)
 
     def headers(self) -> dict[str, str]:
         token = os.environ.get(self.token_env, "") if self.token_env else ""

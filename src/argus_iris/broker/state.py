@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 from collections.abc import AsyncIterator
 
 import httpx
@@ -177,6 +178,47 @@ def compose_node(
     return state
 
 
+def room_for_services(
+    state: NodeState,
+    cfg: NodeConfig,
+    services: list[ServiceConfig],
+    held: dict[str, Resident],
+    peaks: dict[str, int],
+    pinned: set[str],
+) -> list[ServiceState]:
+    """Mark each service on *state* that cannot fit beside what admission can never free (#40); return those.
+
+    *held* maps each such resident (pinned, a dropped pin awaiting restore included; a process iris has no adapter
+    for; what an unloaded service keeps) to it as it holds the most, and *pinned* names the pinned ones. A service's
+    need is its ``warm_mb``, else the most iris has seen it hold; an Ollama service has none unless set, since what it
+    takes depends on the model. What the service holds itself counts toward its need, not against its room. Pure.
+    """
+    if state.ledger is None:
+        return []
+    led = state.ledger
+    base = led.total_mb - cfg.reserve_mb - cfg.headroom_mb
+    led.pinned_mb = sum(r.vram_mb for rid, r in held.items() if rid in pinned)
+    led.held_mb = sum(r.vram_mb for r in held.values())
+    led.room_mb = max(0, base - led.held_mb)
+    by_id = {s.id: s for s in services}
+    crowded: list[ServiceState] = []
+    for st in state.services:
+        svc = by_id.get(st.id)
+        if svc is None:
+            continue
+        if svc.warm_mb is not None:
+            st.need_mb = svc.warm_mb
+        elif svc.adapter != "ollama":
+            st.need_mb = peaks.get(f"{state.name}/{svc.id}")
+        if not st.need_mb:
+            continue
+        st.room_mb = max(0, base - sum(r.vram_mb for r in held.values() if r.service != svc.id))
+        st.crowded_out = st.need_mb > st.room_mb
+        if st.crowded_out:
+            crowded.append(st)
+    return crowded
+
+
 def _volatile_free(state: NodeState) -> dict:
     """A node's state without the fields that change every poll, to tell real changes from ticks."""
     data = state.model_dump(mode="json", exclude={"last_seen"})
@@ -212,6 +254,7 @@ class Broker:
             name: NodeState(name=name, agent_url=cfg.agent_url, reachable=False) for name, cfg in config.nodes.items()
         }
         self._last_seen: dict[str, object] = {}
+        self._crowded: dict[str, set[str]] = {}  # node -> services flagged crowded out
         self._fingerprints: dict[str, dict] = {}
         self._subscribers: set[asyncio.Queue[Event]] = set()
         self.polls = 0
@@ -260,6 +303,7 @@ class Broker:
         for r in state.residents:
             if r.vram_mb > self.peaks.get(r.id, 0):
                 self.peaks[r.id] = r.vram_mb
+        self._check_room(name, state)
         was = self.nodes.get(name)
         if was and was.reachable != state.reachable:
             log.info("agent_reachability", node=name, reachable=state.reachable, error=state.error)
@@ -268,6 +312,69 @@ class Broker:
         if self._fingerprints.get(name) != fingerprint:
             self._fingerprints[name] = fingerprint
             self._publish(("node", state))
+
+    def _held_on(self, state: NodeState) -> tuple[dict[str, Resident], set[str]]:
+        """What admission can never free on *state*'s node, each resident as it holds the most, and which are pins.
+
+        Pinned residents, and a pin that dropped out and residency will load again; a process with no adapter and no
+        tenant (Frigate: a tenant's own process comes and goes with its work); an external service iris may not stop;
+        and the context an unloaded, CPU-parked or failed service keeps, which only a restart returns.
+        """
+        held: dict[str, Resident] = {}
+        pinned: set[str] = set()
+        stoppable = {s.id for s in self.config.services_on(state.name) if s.evict_by}
+        for r in state.residents:
+            if self.residency.pinned(r) or any(fnmatch.fnmatchcase(r.id, pat) for pat in self.config.pinned):
+                pinned.add(r.id)
+            elif not (
+                (r.source == ResidentSource.PROCESS and r.tenant is None)
+                or (r.source == ResidentSource.EXTERNAL and r.service not in stoppable)
+                or r.detail.get("model_state") in ("unloaded", "cpu", "error")
+                or self.residency.evicted(r)
+            ):
+                continue
+            held[r.id] = r
+        for rid, memo in self.residency.pins.items():
+            if memo.resident.node != state.name or not self.residency.pinned(memo.resident):
+                continue
+            pinned.add(rid)
+            if rid not in held or memo.resident.vram_mb > held[rid].vram_mb:
+                held[rid] = memo.resident
+        return held, pinned
+
+    def _check_room(self, name: str, state: NodeState) -> None:
+        """Flag services that cannot fit beside what the node can never free (#40), logging when that changes."""
+        if not state.reachable:
+            return  # no ledger this poll: keep the last verdict rather than flap
+        held, pinned = self._held_on(state)
+        crowded = room_for_services(
+            state, self.config.nodes[name], self.config.services_on(name), held, self.peaks, pinned
+        )
+        now = {st.id: st for st in crowded}
+        was = self._crowded.get(name, set())
+        for sid in now.keys() - was:
+            st = now[sid]
+            biggest = sorted(held.values(), key=lambda r: -r.vram_mb)[:4]
+            log.warning(
+                "service_crowded_out",
+                node=name,
+                service=sid,
+                need_mb=st.need_mb,
+                room_mb=st.room_mb,
+                held_by={r.id: r.vram_mb for r in biggest if r.service != sid},
+            )
+        for sid in was - now.keys():
+            log.info("service_crowded_out_cleared", node=name, service=sid)
+        self._crowded[name] = set(now)
+
+    def crowded(self) -> list[dict]:
+        """Services that cannot fit beside what their node can never free (#40), for /health."""
+        return [
+            {"node": name, "service": st.id, "need_mb": st.need_mb, "room_mb": st.room_mb}
+            for name, state in self.nodes.items()
+            for st in state.services
+            if st.crowded_out
+        ]
 
     async def poll_once(self) -> None:
         names = list(self.config.nodes)

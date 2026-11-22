@@ -42,7 +42,8 @@ argus-iris serve --config iris.yaml   # :8120 — /nodes, /residents, /leases, /
 Callers take leases with `ARGUS_GPU_COORDINATOR=broker` and `ARGUS_GPU_BROKER_URL=http://<broker>:8120` (argus-cortex
 0.7+). A service target goes to the configured services that serve it, in config order (`ollama-dragon` before
 `ollama-jarrah`), preferring a node where the model is already loaded and skipping services that are down; the grant
-carries that node and its `base_url`. When `ARGUS_GPU_BROKER_TOKEN` is set on the broker, the lease routes require it
+carries that node and its `base_url`. A service also answers the names in its `serves` list (morpheus's argus-echo
+XTTS has `serves: [xtts]`, so an `xtts` lease that does not fit on dragon goes there). When `ARGUS_GPU_BROKER_TOKEN` is set on the broker, the lease routes require it
 as a bearer token; unset, they are open. `GET /leases` lists what is queued or granted (`?all=true` adds the last ten
 minutes' finished leases).
 
@@ -68,7 +69,9 @@ curl -X POST -H "Authorization: Bearer $ARGUS_GPU_BROKER_TOKEN" \
 
 The broker also serves a dashboard at `http://<broker>:8120/ui/` (`/` redirects there): VRAM per node split into
 residents, unattributed, held-back and admissible memory, plus residents with idle times, services with a warm button, residents with an evict button,
-and the node's leases (marked "over" where admission would have refused them).
+and the node's leases (marked "over" where admission would have refused them). A service is flagged when what the node
+can never free (pins, unmanaged processes, unloaded residues) leaves less room than it needs; `/health` lists those
+under `crowded_out`.
 It updates live from `/events`. To warm from the page, enter `ARGUS_GPU_BROKER_TOKEN` under "Broker token". It is kept
 in that tab's session storage only.
 

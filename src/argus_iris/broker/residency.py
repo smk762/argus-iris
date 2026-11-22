@@ -14,8 +14,8 @@ are handed over one at a time (#6).
   iris, not Ollama's default, decides when it goes.
 - **Unload after** (``unload_after``): a resident idle-kill moved to the CPU is unloaded fully once idle this much
   longer, freeing host RAM as well (the sidecars' own CPU timers stop running when their GPU timer is -1).
-- **Restart** (``restart_residual_mb``): a resident that is unloaded (not merely on the CPU, where a restart would
-  throw away the warm copy) but still holds at least this much VRAM (a CUDA
+- **Restart** (``restart_residual_mb``): a resident that is unloaded, or failed to load (not merely on the CPU, where
+  a restart would throw away the warm copy) but still holds at least this much VRAM (a CUDA
   context, an allocator cache: modernbert's 94 MB, Miso's 2 GB) and is due is restarted through its node's agent,
   which only restarts containers on its own allowlist.
 - **Host RAM** (``restart_host_ram_mb``, else the tenant manifest's ``host_ram_restart_mb``): a resident whose
@@ -202,11 +202,14 @@ class Residency:
                     return "unload", "on the CPU past unload_after: unload fully"
                 return None, f"on the CPU; unload in {int(left_s)}s"
             return None, f"on the CPU ({r.vram_mb} MB left)" if r.vram_mb else "on the CPU"
-        if state in _FREED or self.evicted(r):
+        if state in _FREED or state == "error" or self.evicted(r):
+            # error: a load that failed, often for want of room, leaving its CUDA context and partial weights (#40).
+            # Nothing is loaded, so a restart loses nothing and is the only way to get that memory back.
+            what = "failed to load" if state == "error" else "unloaded"
             svc = self._service(r)
             if rule.restart_residual_mb is not None and r.vram_mb >= rule.restart_residual_mb and svc and svc.container:
-                return "restart", f"unloaded but holding {r.vram_mb} MB: restart {svc.container}"
-            return None, f"unloaded ({r.vram_mb} MB left)" if r.vram_mb else "unloaded"
+                return "restart", f"{what} but holding {r.vram_mb} MB: restart {svc.container}"
+            return None, f"{what} ({r.vram_mb} MB left)" if r.vram_mb else what
         return "evict", "idle-kill due"
 
     def annotate(self, state: NodeState) -> None:

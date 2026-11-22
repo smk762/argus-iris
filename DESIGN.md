@@ -212,7 +212,18 @@ that ignores it is not killed, but from the first `yield_requested` iris stops e
   fewer granted leases goes first (then the one with the model loaded), so concurrent jobs spread over the two; an
   Ollama whose `/api/tags` lacks the model is skipped unless none has it. A lease that fits nowhere waits on the node
   its running leases would free.
+- `xtts`: dragon's XTTS sidecar first, then morpheus's argus-echo XTTS (same studio speakers), which declares
+  `serves: [xtts]` (#40). A service answers a target named after its id, its adapter, or anything in `serves`, so one
+  target can have a service on several nodes, and the grant's `base_url` says which one to call.
 - `in-process` with constraints: `min_vram_mb`, `bf16`, `min_cc`, or an explicit node for a process pinned to a host.
+
+**Room that never comes back** (#40). Each poll, iris sums what admission can never free on a node: pinned residents
+(a pin that dropped out and is due to be restored included), processes it has no adapter for and no tenant owns
+(Frigate), externals it may not stop, and the context an unloaded, CPU-parked or failed service keeps. A service whose
+need (`warm_mb`, else the most it has been seen holding) exceeds what is left beside that is `crowded_out`: on
+`/health` (`crowded_out`), the node's services (`need_mb`, `room_mb`), `iris_service_crowded_out`, the dashboard, and a
+`service_crowded_out` log naming the biggest holders. It is a report, not an action: the operator moves a pin, adds a
+node for the target (`serves`), or lets `restart_residual_mb` return a residue.
 
 ## Policy: schedules, keepalive, idle-kill
 
