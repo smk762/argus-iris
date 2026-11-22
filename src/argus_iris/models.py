@@ -120,6 +120,7 @@ class Resident(BaseModel):
     idle_s: float | None = None
     busy: bool = False  # the service reports work in flight (ComfyUI queue, ...)
     host_ram_mb: int | None = None  # its container's anonymous memory (cgroup), when the agent reports it
+    peak_mb: int | None = None  # the most VRAM iris has seen it hold since the broker started (sampled each poll)
     expires_at: datetime | None = None  # Ollama keep_alive expiry
     detail: dict = Field(default_factory=dict)
     tenant: str | None = None  # the tenant whose own process or service this is, when iris can link it (#36)

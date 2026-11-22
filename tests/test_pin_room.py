@@ -205,3 +205,12 @@ def test_a_dropped_pin_still_holds_its_room() -> None:
     broker._apply("dragon", node("dragon"))  # SingGuard dropped out: residency will load it again
     assert broker.nodes["dragon"].ledger.pinned_mb == 5300
     assert [c["service"] for c in broker.crowded()] == ["xtts"]
+
+
+def test_residents_carry_the_most_vram_seen() -> None:
+    broker = Broker(CONFIG)
+    broker._apply("dragon", node("dragon", residents=[argus("dragon", "tts", 3400)]))  # generating
+    broker._apply("dragon", node("dragon", residents=[argus("dragon", "tts", 600), argus("dragon", "xtts", 0)]))
+    tts = next(r for r in broker.residents() if r.id == "dragon/tts")
+    assert (tts.vram_mb, tts.peak_mb) == (600, 3400)
+    assert next(r for r in broker.residents() if r.id == "dragon/xtts").peak_mb is None  # never held anything

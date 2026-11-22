@@ -303,6 +303,7 @@ class Broker:
         for r in state.residents:
             if r.vram_mb > self.peaks.get(r.id, 0):
                 self.peaks[r.id] = r.vram_mb
+            r.peak_mb = self.peaks.get(r.id)
         self._check_room(name, state)
         was = self.nodes.get(name)
         if was and was.reachable != state.reachable:
