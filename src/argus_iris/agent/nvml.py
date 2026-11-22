@@ -5,6 +5,7 @@ Synchronous (pynvml is); the agent calls :meth:`NvmlSampler.sample` from a worke
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from dataclasses import dataclass, field
 
@@ -45,13 +46,16 @@ class NvmlSampler:
             self._ready = True
         return pynvml
 
+    def _shutdown(self) -> None:
+        if self._ready:
+            import pynvml  # noqa: PLC0415
+
+            self._ready = False
+            pynvml.nvmlShutdown()
+
     def close(self) -> None:
         with self._lock:
-            if self._ready:
-                import pynvml  # noqa: PLC0415
-
-                pynvml.nvmlShutdown()
-                self._ready = False
+            self._shutdown()
 
     def sample(self) -> Sample:
         with self._lock:
@@ -59,7 +63,10 @@ class NvmlSampler:
                 nv = self._init()
                 return self._sample(nv)
             except Exception as exc:  # noqa: BLE001 - any NVML failure becomes a reported error, not a crash
-                self._ready = False  # re-init next time (driver reload, container restart)
+                # Re-init next time (driver reload, container restart). NVML counts inits and only re-inits once
+                # the count is back to zero, so each init is matched by a shutdown here.
+                with contextlib.suppress(Exception):
+                    self._shutdown()  # clears _ready even if the shutdown itself fails
                 return Sample(error=f"{type(exc).__name__}: {exc}")
 
     def _sample(self, nv) -> Sample:
