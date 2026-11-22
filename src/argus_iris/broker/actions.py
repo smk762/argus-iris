@@ -81,9 +81,11 @@ async def container_action(broker: Broker, svc: ServiceConfig, action: Literal["
         raise ActionError(f"agent on {svc.node} unreachable: {exc}") from exc
     if resp.status_code != 200:
         try:
-            detail = resp.json().get("detail")
+            body = resp.json()
         except ValueError:
-            detail = resp.text[:200]
+            body = None
+        # Not every refusal is the agent's own JSON object: a proxy's list, string or null body is shown as text.
+        detail = body.get("detail") if isinstance(body, dict) else resp.text[:200]
         raise ActionError(f"agent on {svc.node} refused to {action} {svc.container}: HTTP {resp.status_code} {detail}")
 
 
@@ -345,7 +347,9 @@ async def set_keep_alive(broker: Broker, resident: Resident, keep_alive: str | i
     dragon), and the caller's next request reloaded it back, about once a minute while it was pinned. For a model that
     is not loaded (residency restoring a pin, #35) the same call loads it, at the context it had.
     """
-    svc = next(s for s in broker.config.services if s.id == resident.service)
+    svc = next((s for s in broker.config.services if s.id == resident.service), None)
+    if svc is None:  # a pin restored for a service the config no longer has
+        raise ActionError(f"unknown service {resident.service!r} for {resident.model}", 404)
     body: dict = {"model": resident.model, "keep_alive": keep_alive}
     if ctx := resident.detail.get("context_length"):
         body["options"] = {"num_ctx": ctx}

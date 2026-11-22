@@ -62,6 +62,7 @@ def _service_residents(
                 model=m.name,
                 vram_mb=m.vram_mb,
                 idle_s=idle,  # per process: Ollama does not say which model ran last
+                busy=reading.busy,
                 expires_at=m.expires_at,
                 detail=m.detail,
             )

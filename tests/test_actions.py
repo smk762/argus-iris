@@ -219,3 +219,33 @@ async def test_warm_without_a_known_size_is_not_refused() -> None:
     broker = broker_for(World())
     _full_node(broker, admissible_mb=0, held={})
     assert (await warm_service(broker, "diffusers", poll_s=0)).warmed
+
+
+async def test_keep_alive_for_an_unknown_service_is_an_action_error() -> None:
+    from argus_iris.broker.actions import set_keep_alive
+    from argus_iris.models import Resident, ResidentSource
+
+    gone = Resident(
+        id="morpheus/removed/x:1",
+        node="morpheus",
+        service="removed",
+        source=ResidentSource.OLLAMA,
+        model="x:1",
+        vram_mb=1,
+    )
+    with pytest.raises(ActionError, match="unknown service 'removed'") as exc:
+        await set_keep_alive(broker_for(World()), gone, -1)
+    assert exc.value.status == 404
+
+
+@pytest.mark.parametrize("body", [b'["no"]', b'"no"', b"null"], ids=["list", "string", "null"])
+async def test_a_non_object_refusal_from_the_agent_is_an_action_error(body) -> None:
+    from argus_iris.broker.actions import container_action
+
+    broker = Broker(
+        BrokerConfig.model_validate(CONFIG),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(403, content=body))),
+    )
+    svc = next(s for s in broker.config.services if s.id == "comfyui")
+    with pytest.raises(ActionError, match="refused to stop voluptas_comfyui: HTTP 403"):
+        await container_action(broker, svc, "stop")
