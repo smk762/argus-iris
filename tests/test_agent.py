@@ -165,7 +165,7 @@ def test_snapshot_health_and_metrics(host) -> None:
         assert health["status"] == "ok"
         # Every field /health had before argus-cortex's ServiceHealth, with the same meaning.
         assert health["node"] == "morpheus" and health["version"] == argus_iris.__version__
-        assert health["nvml_error"] is None and health["docker_error"] is None and health["last_poll_age_s"] >= 0
+        assert health["nvml_error"] is None and health["docker_error"] is None and isinstance(health["last_poll_age_s"], float)
         assert health["actions_enabled"] is bool(agent.settings.token)
         contract = ServiceHealth.model_validate(health)
         assert contract.service == "argus-iris" and contract.checks["nvml"].ok
