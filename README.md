@@ -75,6 +75,8 @@ at the agent's host and the published port. The rules match registered residents
 one when a container publishes several, and a loopback-only bind is reported and not served. Health comes from
 `argus.health` (default `/health`) every 30 s. A body that validates as argus-cortex's `ServiceHealth` is read through
 that model (`health.contract` is true); anything else is read field by field and is up or down by its HTTP status.
+`health.capabilities` is always a list of the names that are on, whether the service sent a list or a map of name to
+boolean (`service_version` 1.1, argus-cortex 0.16.1).
 `peers:` in `iris.yaml` adds URLs for peers outside the agents' view; configured peers come first.
 
 The entries and the lookup reply are argus-cortex's wire models (`argus_cortex.service.DirectoryEntry`, `EntryHealth`,
