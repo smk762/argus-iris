@@ -62,6 +62,11 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
   `X-Argus-Admin-Token`, never a `token_env`. `DELETE /tenants` lapses (cortex signs off on every shutdown), `?purge=true`
   drops; lapsed services live while their container exists. Agents announce nodes (`POST /nodes`, agent token).
   Persisted to `$IRIS_STATE_DIR/registrations.json` (0600).
+- `broker/directory.py` — the service directory (#48): containers labelled `argus.peer` (the agent's inventory carries
+  `argus.*` labels only) plus the config's `peers:`. URL by `registry.container_port` (shared with residents), health
+  read tolerantly as argus-cortex `ServiceHealth` (only parsed fields kept, never the body), probed when due
+  (`directory_health_s`). Routes `/directory`, `/directory/sd` (Prometheus http_sd), `/directory/{peer}` (needs the
+  caller token: it decides where work goes). Read-only.
 - `server/app.py` — the broker API (`[server]` extra, `argus-iris serve`, :8120): `/nodes`, `/residents`, `/events`
   (SSE: `node` and `lease` events), `/metrics`, `/health`, `/ui/`, `/services`, `/registry`, `POST`/`DELETE /nodes`, `DELETE /tenants/{t}`, the lease routes (`POST /tenants`, `POST /leases`,
   `GET /leases/{id}?wait_s=`, `.../heartbeat`, `.../release`, `GET /leases`, `/queue`, `/tenants`; bearer token

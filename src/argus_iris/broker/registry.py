@@ -312,7 +312,7 @@ class Registry:
                 id=sid,
                 node=node,
                 adapter=adapter,  # type: ignore[arg-type]
-                base_url=f"{scheme}://{_host(self.config.nodes[node].agent_url)}:{port}{path}",
+                base_url=f"{scheme}://{host_of(self.config.nodes[node].agent_url)}:{port}{path}",
                 serves=serves,
                 container=entry.name if entry else r.container,
                 health_path=r.health_path,
@@ -520,7 +520,7 @@ def _agent_url(url: str) -> str:
     return url.rstrip("/")
 
 
-def _host(url: str) -> str:
+def host_of(url: str) -> str:
     host = urlsplit(url).hostname or ""
     return f"[{host}]" if ":" in host else host
 
@@ -547,7 +547,13 @@ def _loopback_only(p: PortMap) -> bool:
 
 def _port(r: TenantResident, entry: ContainerEntry | None) -> tuple[int | None, str | None]:
     """The host port that reaches resident *r* in *entry*, or None and why not."""
-    port, why = _pick_port(r, entry)
+    return container_port(entry, getattr(r, "port", None) or _url_port(r.base_url), "set port in the manifest")
+
+
+def container_port(entry: ContainerEntry | None, want: int | None, hint: str) -> tuple[int | None, str | None]:
+    """The host port that reaches *entry* (its container port *want*, else the one it publishes for the LAN), or
+    None and why not; *hint* says how to name one. Shared by registered residents and the service directory."""
+    port, why = _pick_port(entry, want, hint)
     if port is not None and entry is not None and not entry.host_network:
         hit = next(p for p in entry.ports if p.public == port and p.proto == "tcp")
         if _loopback_only(hit):
@@ -555,10 +561,9 @@ def _port(r: TenantResident, entry: ContainerEntry | None) -> tuple[int | None, 
     return port, why
 
 
-def _pick_port(r: TenantResident, entry: ContainerEntry | None) -> tuple[int | None, str | None]:
-    want = getattr(r, "port", None) or _url_port(r.base_url)
+def _pick_port(entry: ContainerEntry | None, want: int | None, hint: str) -> tuple[int | None, str | None]:
     if entry is None or entry.host_network:
-        return (want, None) if want else (None, "no port: set port in the manifest")
+        return (want, None) if want else (None, f"no port: {hint}")
     tcp = [p for p in entry.ports if p.proto == "tcp"]
     if want:
         hit = next((p for p in tcp if p.private == want), None) or next((p for p in tcp if p.public == want), None)
@@ -575,7 +580,7 @@ def _pick_port(r: TenantResident, entry: ContainerEntry | None) -> tuple[int | N
     if not published:
         return None, f"{entry.name} publishes no port"
     ports = ", ".join(str(p.private) for p in published)
-    return None, f"{entry.name} publishes several ports ({ports}): set port in the manifest"
+    return None, f"{entry.name} publishes several ports ({ports}): {hint}"
 
 
 def _service_id(name: str, node: str, tenant: str, taken: set[str], several: bool) -> str:

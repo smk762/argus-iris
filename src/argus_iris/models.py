@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -82,6 +83,9 @@ class ContainerEntry(BaseModel):
     # The agent would start, stop or restart it: on IRIS_AGENT_CONTAINERS, or labelled argus.iris.manage=true where
     # the agent opted in to the label (IRIS_AGENT_MANAGE_LABEL).
     managed: bool = False
+    # Its argus.* labels only (argus.peer, argus.service, argus.health, argus.port: the service directory, #48).
+    # Other labels can hold anything, so they never leave the host.
+    labels: dict[str, str] = Field(default_factory=dict)
 
 
 class NodeSnapshot(BaseModel):
@@ -198,3 +202,49 @@ class NodeState(BaseModel):
     ledger: NodeLedger | None = None
     residents: list[Resident] = Field(default_factory=list)
     services: list[ServiceState] = Field(default_factory=list)
+
+
+# ── service directory (#48) ───────────────────────────────────────────────────
+
+
+class DependencyCheck(BaseModel):
+    ok: bool
+    detail: str | None = None
+
+
+class EntryHealth(BaseModel):
+    """What a directory entry's ``/health`` said, read tolerantly: in full when it is argus-cortex's ``ServiceHealth``
+    (cortex#210), and as up or down from the HTTP status otherwise."""
+
+    checked_at: datetime
+    status: Literal["ok", "degraded", "starting", "down"]
+    http_status: int | None = None  # None: no answer
+    contract: bool = False  # the body is a ServiceHealth (service, version and status at the top level)
+    service: str | None = None
+    version: str | None = None
+    wire: dict[str, str] = Field(default_factory=dict)
+    capabilities: list[str] = Field(default_factory=list)
+    checks: dict[str, DependencyCheck] = Field(default_factory=dict)
+    error: str | None = None
+
+
+class DirectoryEntry(BaseModel):
+    """One labelled container (``argus.peer``) on a node, or a peer the broker config names."""
+
+    peer: str
+    origin: Literal["label", "config"]
+    service: str | None = None  # the argus.service label, else what its health says
+    node: str | None = None
+    container: str | None = None
+    running: bool = True
+    url: str | None = None  # an agent's host and the published port; None: not reachable, see reason
+    reason: str | None = None
+    health_path: str = "/health"
+    health: EntryHealth | None = None
+
+
+class PeerLookup(BaseModel):
+    """``GET /directory/{peer}``: where callers reach *peer*, best first (cortex#207)."""
+
+    peer: str
+    urls: list[DirectoryEntry]

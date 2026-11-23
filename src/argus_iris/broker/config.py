@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
@@ -174,6 +175,28 @@ class BrokerConfig(BaseModel):
     # Where registrations (manifests, the admin tokens they came with, announced nodes) are kept across restarts.
     # IRIS_STATE_DIR overrides it; unset, they live in memory and clients re-register within registration_ttl_s.
     state_dir: str | None = None
+    # Service directory (#48): containers labelled argus.peer on any node, read from the agents' inventories. Peers
+    # named here (e.g. a host with no iris agent) come first: config wins. Each name maps to one URL or several.
+    peers: dict[str, list[str]] = Field(default_factory=dict)
+    directory_health_s: float = Field(30.0, gt=0)  # how often each entry's /health is read
+    directory_probe_timeout_s: float = Field(3.0, gt=0, le=30)
+
+    @field_validator("peers", mode="before")
+    @classmethod
+    def _peer_lists(cls, v: object) -> object:
+        if isinstance(v, dict):
+            return {k: [u] if isinstance(u, str) else u for k, u in v.items()}
+        return v
+
+    @field_validator("peers")
+    @classmethod
+    def _peer_urls(cls, v: dict[str, list[str]]) -> dict[str, list[str]]:
+        for name, urls in v.items():
+            for url in urls:
+                parts = urlsplit(url)
+                if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
+                    raise ValueError(f"peers.{name}: {url!r} is not an http(s) URL with a host and no credentials")
+        return {name: [u.rstrip("/") for u in urls] for name, urls in v.items()}
 
     @model_validator(mode="after")
     def _check(self) -> BrokerConfig:

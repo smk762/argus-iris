@@ -321,6 +321,7 @@ through cortex's `WriteGuard` and take an optional `Authorization: Bearer <ARGUS
 | `DELETE` | `/tenants/{tenant}` | Sign off: the registration lapses now. `?purge=true` drops it and its services at once. |
 | `GET` | `/services`, `/registry` | Every service with its origin (`config` or `tenant`); registered tenants with where each resident landed or why not, and nodes with theirs. |
 | `POST` | `/nodes` | An agent announces its node (agent token). `DELETE /nodes/{name}` forgets an announced one. |
+| `GET` | `/directory`, `/directory/{peer}`, `/directory/sd` | Service directory (#48): containers labelled `argus.peer` with URL and health; peer lookup (caller token); Prometheus http_sd. |
 | `GET` | `/nodes`, `/residents`, `/queue`, `/stats` | State for the dashboard and for operators. |
 | `POST` | `/services/{id}/warm` | Manual: start the service's container through its agent if the service is down, wait for its health check, then call its `warm_path`. A stopped service has no resident, so this targets the service. |
 | `POST` | `/residents/{id}/evict` | Manual eviction from the dashboard (step 4). |

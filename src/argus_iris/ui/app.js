@@ -15,6 +15,7 @@ const colours = new Map(); // node -> Map(service -> slot), grows only: colour f
 let config = null;
 let services = null; // GET /services: every service, configured and registered (null until first read)
 let registry = null; // GET /registry: tenants (with placements) and nodes (with origin)
+let directory = null; // GET /directory: every argus.peer-labelled container and configured peer, with health
 
 // ---------- formatting ----------
 const gb = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(mb >= 10240 ? 0 : 1)} GB` : `${Math.round(mb)} MB`);
@@ -470,12 +471,46 @@ function renderRegistry() {
   }));
 }
 
+// The Suite view: one row per labelled service, healthiest problems first so a failing one is at the top.
+const HEALTH_RANK = { down: 0, starting: 1, degraded: 2, ok: 3 };
+function renderSuite() {
+  const tbody = $("table.suite tbody");
+  const cnt = $("#count-suite");
+  if (!directory) { fill(tbody, noRows(6, "This broker has no service directory.")); cnt.textContent = ""; return; }
+  const status = (e) => (!e.running ? "stopped" : !e.url ? "unreachable" : e.health?.status ?? "unchecked");
+  const rank = (e) => HEALTH_RANK[status(e)] ?? -1;
+  const rows = [...directory].sort((a, b) => rank(a) - rank(b) || a.peer.localeCompare(b.peer) || (a.node ?? "").localeCompare(b.node ?? ""));
+  const bad = rows.filter((e) => e.running && ["down", "degraded", "unreachable"].includes(status(e))).length;
+  cnt.textContent = rows.length ? String(rows.length) : "";
+  cnt.toggleAttribute("data-alert", bad > 0);
+  fill(tbody, rows.length ? rows.map((e) => {
+    const h = e.health;
+    const st = status(e);
+    const cls = st === "ok" ? "status-up" : ["down", "unreachable"].includes(st) ? "status-down" : "";
+    const failing = Object.entries(h?.checks ?? {}).filter(([, c]) => !c.ok);
+    return el("tr", {},
+      el("td", {}, e.peer, e.origin === "config" ? el("span", { class: "sub", text: "from the broker config" }) : null),
+      el("td", {}, e.service ?? el("span", { class: "meta", text: "–" }),
+        h?.version ? el("span", { class: "sub", text: `v${h.version}${h.contract ? "" : " (off contract)"}` })
+          : h && !h.contract ? el("span", { class: "sub", text: "no ServiceHealth body" }) : null),
+      el("td", { text: e.node ?? "–" }),
+      el("td", {}, e.url ? el("code", { text: e.url }) : el("span", { class: "svc-err alert", text: e.reason ?? "not reachable" }),
+        e.container ? el("span", { class: "sub", text: `container ${e.container}` }) : null),
+      el("td", {}, el("span", { class: cls, text: st }),
+        h?.error ? el("span", { class: "svc-err", text: h.error }) : null,
+        ...failing.map(([name, c]) => el("span", { class: "svc-err alert", text: `${name}: ${c.detail ?? "failing"}` })),
+        h?.capabilities?.length ? el("span", { class: "sub", text: h.capabilities.join(", ") }) : null),
+      el("td", { class: "num", "data-idle": h ? since(h.checked_at) : "", "data-at": Date.now(), text: h ? dur(since(h.checked_at)) : "–" }));
+  }) : noRows(6, "Nothing labelled yet. Add labels: {argus.peer: <name>} to a service's compose file."));
+}
+
 let registryTimer = null;
 async function loadRegistry() {
   try {
-    const [s, r] = await Promise.all([fetch(api("services")), fetch(api("registry"))]);
+    const [s, r, d] = await Promise.all([fetch(api("services")), fetch(api("registry")), fetch(api("directory"))]);
     if (!s.ok || !r.ok) throw new Error(`HTTP ${s.ok ? r.status : s.status}`);
     [services, registry] = [await s.json(), await r.json()];
+    directory = d.ok ? await d.json() : null; // an older broker has no directory: the Suite tab says so
   } catch (e) {
     if (!services) fill($("table.services-all tbody"), noRows(7, `Could not read the registry: ${e.message}`));
     return;
@@ -489,6 +524,7 @@ async function loadRegistry() {
     document.getElementById(`node-${name}`)?.remove();
   }
   renderRegistry();
+  renderSuite();
   renderAgents();
   for (const s of nodes.values()) renderNode(s); // origins, warm buttons and colours follow the registry
 }

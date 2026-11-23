@@ -28,7 +28,12 @@ class FakeDocker:
                 "Id": COMFY_ID,
                 "Names": ["/voluptas_comfyui"],
                 "State": "running",
-                "Labels": {"com.docker.compose.service": "comfyui", "com.docker.compose.project": "voluptas"},
+                "Labels": {
+                    "com.docker.compose.service": "comfyui",
+                    "com.docker.compose.project": "voluptas",
+                    "argus.peer": "comfyui",
+                    "traefik.http.routers.x.middlewares": "basic-auth secret",
+                },
                 "Ports": [
                     {"PrivatePort": 8188, "PublicPort": 8188, "Type": "tcp", "IP": "0.0.0.0"},
                     {"PrivatePort": 8188, "PublicPort": 8188, "Type": "tcp", "IP": "::"},
@@ -227,6 +232,7 @@ async def test_inventory_lists_every_container_with_ports_and_management(host) -
     assert [(p.private, p.public) for p in comfy.ports] == [(8188, 8188)]  # IPv4 and IPv6 bindings fold into one
     assert comfy.ports[0].ips == ["0.0.0.0", "::"]
     assert comfy.managed  # allow-listed
+    assert comfy.labels == {"argus.peer": "comfyui"}  # argus.* only: other labels never leave the host
     assert not echo.running and echo.host_network and echo.ports[0].public is None
     assert not echo.managed  # labelled, but this agent has not opted in to the label
 

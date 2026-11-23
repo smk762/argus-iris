@@ -19,6 +19,7 @@ import structlog
 
 from argus_iris.broker.adapters import ServiceReading, build_adapter
 from argus_iris.broker.config import BrokerConfig, NodeConfig, ServiceConfig
+from argus_iris.broker.directory import Directory
 from argus_iris.broker.leases import LeaseBook, LeaseRecord
 from argus_iris.broker.policy import Policy
 from argus_iris.broker.registry import Registry
@@ -260,6 +261,8 @@ class Broker:
         self.registry.load()
         self.registry.reconcile()
         self._adapters = {s.id: build_adapter(s) for s in config.services}
+        self.directory = Directory(config, self._client)
+        self.directory.rebuild(self.registry.inventory)
         self.nodes: dict[str, NodeState] = {
             name: NodeState(name=name, agent_url=cfg.agent_url, reachable=False) for name, cfg in config.nodes.items()
         }
@@ -427,6 +430,7 @@ class Broker:
         """Bring nodes, services and adapters in line with the registry (a registration, a lapse, an announced
         node, or a container that came or went). True when the services changed."""
         changed = self.registry.reconcile()
+        self.directory.rebuild(self.registry.inventory)
         if changed:
             adapters = {}
             for s in self.config.services:
@@ -448,7 +452,15 @@ class Broker:
         return state
 
     async def run(self) -> None:
-        await asyncio.gather(self._poll_loop(), self._tick_loop(), self._residency_loop())
+        await asyncio.gather(self._poll_loop(), self._tick_loop(), self._residency_loop(), self._directory_loop())
+
+    async def _directory_loop(self) -> None:
+        while True:
+            try:
+                await self.directory.probe()
+            except Exception:  # noqa: BLE001 - a failed round must not stop the directory for good
+                log.exception("directory_probe_failed")
+            await asyncio.sleep(min(5.0, self.config.directory_health_s))
 
     async def _poll_loop(self) -> None:
         while True:

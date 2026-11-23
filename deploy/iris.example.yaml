@@ -116,5 +116,11 @@ register_services: true
 register_nodes: true
 registration_ttl_s: 900          # not renewed this long: lapsed (kept while the container exists)
 
+# Service directory: containers labelled argus.peer on any node are listed at /directory with their health. Name
+# peers here that no agent can see (a host without iris-agent); they come first for that name.
+# peers:
+#   ocr: http://192.168.1.50:8133
+directory_health_s: 30
+
 # Browser origins (the Studio page) allowed to make state-changing requests.
 trusted_origins: []
