@@ -67,6 +67,18 @@ def _tolerant_checks(raw: Any) -> dict[str, DependencyCheck]:
     return checks
 
 
+def _tolerant_capabilities(raw: Any) -> tuple[str, ...]:
+    """The names that are on, as ``ServiceHealth.capability_names`` gives them: a list's strings, or the sorted names
+    a map marks ``true``. Anything else in either form is dropped."""
+    if isinstance(raw, dict):
+        names = sorted(k for k, on in raw.items() if isinstance(k, str) and on is True)
+    elif isinstance(raw, list):
+        names = [c for c in raw if isinstance(c, str)]
+    else:
+        return ()
+    return tuple(c[:64] for c in names[:_MAX_ITEMS])
+
+
 def read_health(
     status_code: int | None, body: Any, *, error: str | None = None, now: datetime | None = None
 ) -> EntryHealth:
@@ -86,22 +98,19 @@ def read_health(
             "service": health.service,
             "version": health.version,
             "wire": {k[:64]: v[:32] for k, v in list(health.wire.items())[:_MAX_ITEMS]},
-            "capabilities": tuple(c[:64] for c in health.capabilities[:_MAX_ITEMS]),
+            "capabilities": tuple(c[:64] for c in health.capability_names[:_MAX_ITEMS]),
             "checks": {k[:64]: c for k, c in list(health.checks.items())[:_MAX_ITEMS]},
         }
     else:
         said = data.get("status") if data.get("status") in STATUSES else None
         wire = data.get("wire")
-        caps = data.get("capabilities")
         fields = {
             "service": _text(data.get("service"), 100),
             "version": _text(data.get("version"), 100),
             "wire": {str(k)[:64]: v[:32] for k, v in list(wire.items())[:_MAX_ITEMS] if isinstance(v, str)}
             if isinstance(wire, dict)
             else {},
-            "capabilities": tuple(c[:64] for c in caps[:_MAX_ITEMS] if isinstance(c, str))
-            if isinstance(caps, list)
-            else (),
+            "capabilities": _tolerant_capabilities(data.get("capabilities")),
             "checks": _tolerant_checks(data.get("checks")),
         }
     if status_code == 503:

@@ -66,7 +66,8 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
 - `broker/directory.py` — the service directory (#48): containers labelled `argus.peer` (the agent's inventory carries
   `argus.*` labels only) plus the config's `peers:`. URL by `registry.container_port` (shared with residents), health
   parsed as argus-cortex `ServiceHealth` (`contract`), else read field by field (only parsed fields kept, bounded,
-  never the body), probed when due (`directory_health_s`). Entries are cortex's frozen `DirectoryEntry`: replace one
+  never the body; `capabilities` from `capability_names`, so a 1.1 map becomes the list of names that are on),
+  probed when due (`directory_health_s`). Entries are cortex's frozen `DirectoryEntry`: replace one
   (`_with_health`), never assign to it. A label cortex's model refuses (peer name, health path) skips that container
   with one `directory_label_refused` log line and must never raise; `lookup` of such a name is `None` (a 404). Routes `/directory`, `/directory/sd` (Prometheus http_sd), `/directory/{peer}` (needs the
   caller token: it decides where work goes). Read-only.

@@ -139,6 +139,36 @@ def test_read_health_takes_the_contract_and_tolerates_anything_else() -> None:
     assert len(many.capabilities) == 32 and len(many.wire) == 32
 
 
+def test_capabilities_as_a_map_list_only_the_names_that_are_on() -> None:
+    """#52: argus-cortex 0.16.1 (service_version 1.1) lets capabilities be a map of name to boolean (argus-mint,
+    argus-lens). Such a body is still the contract, and the entry keeps a list: the names that are on, sorted."""
+    body = {
+        "service_version": "1.1",
+        "service": "argus-mint",
+        "version": "0.3.0",
+        "status": "ok",
+        "started_at": "2026-11-23T00:00:00Z",
+        "capabilities": {"teasers": True, "identity_check": False, "cards": True},
+    }
+    mapped = read_health(200, body)
+    assert mapped.contract and mapped.status == "ok"
+    assert mapped.capabilities == ("cards", "teasers")
+    assert mapped.model_dump(mode="json")["capabilities"] == ["cards", "teasers"]  # a JSON array on the wire
+    assert read_health(200, {**body, "capabilities": {"a": False}}).capabilities == ()
+    # The list form, on 1.0 or 1.1, is kept as given.
+    for version in ("1.0", "1.1"):
+        listed = read_health(200, {**body, "service_version": version, "capabilities": ["tts", "clone"]})
+        assert listed.contract and listed.capabilities == ("tts", "clone")
+    # A map whose values are not booleans is not the contract; read field by field, only a real true counts.
+    loose = read_health(200, {**body, "capabilities": {"b": True, "a": True, "maybe": "yes", "one": 1, "off": False}})
+    assert not loose.contract and loose.capabilities == ("a", "b")
+    # Bounded in either path, after sorting.
+    many = {f"c{i:03}": True for i in range(100)}
+    for extra in ({}, {"started_at": None}):
+        kept = read_health(200, {**body, **extra, "capabilities": many}).capabilities
+        assert kept == tuple(f"c{i:03}" for i in range(32))
+
+
 def test_a_container_with_a_refused_label_is_skipped_and_logged_once() -> None:
     bad = {
         "morpheus": [
