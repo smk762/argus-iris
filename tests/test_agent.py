@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 
 import httpx
@@ -22,6 +23,27 @@ class FakeDocker:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.listing = [
+            {
+                "Id": COMFY_ID,
+                "Names": ["/voluptas_comfyui"],
+                "State": "running",
+                "Labels": {"com.docker.compose.service": "comfyui", "com.docker.compose.project": "voluptas"},
+                "Ports": [
+                    {"PrivatePort": 8188, "PublicPort": 8188, "Type": "tcp", "IP": "0.0.0.0"},
+                    {"PrivatePort": 8188, "PublicPort": 8188, "Type": "tcp", "IP": "::"},
+                ],
+                "HostConfig": {"NetworkMode": "voluptas_default"},
+            },
+            {
+                "Id": "e" * 64,
+                "Names": ["/echo"],
+                "State": "exited",
+                "Labels": {"argus.iris.manage": "true"},
+                "Ports": [{"PrivatePort": 8141, "Type": "tcp"}],
+                "HostConfig": {"NetworkMode": "host"},
+            },
+        ]
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(f"{request.method} {request.url.path}")
@@ -36,6 +58,20 @@ class FakeDocker:
                     "State": {"Running": True, "Pid": 100},
                 },
             )
+        if request.method == "GET" and path == "/containers/json":
+            return httpx.Response(200, json=self.listing)
+        if request.method == "GET" and path == "/containers/echo/json":
+            return httpx.Response(
+                200,
+                json={
+                    "Id": "e" * 64,
+                    "Name": "/echo",
+                    "Config": {"Labels": {"argus.iris.manage": "true"}},
+                    "State": {"Running": True, "Pid": 300},
+                },
+            )
+        if request.method == "POST" and path.startswith("/containers/echo/"):
+            return httpx.Response(204)
         if request.method == "POST" and path == "/containers/voluptas_comfyui/start":
             return httpx.Response(304)
         if request.method == "POST" and path.startswith("/containers/voluptas_comfyui/"):
@@ -180,3 +216,56 @@ async def test_docker_error_clears_once_docker_recovers(host) -> None:
     down = False
     await agent.poll_once()
     assert agent.docker_error is None
+
+
+async def test_inventory_lists_every_container_with_ports_and_management(host) -> None:
+    agent = make_agent(host, FakeDocker())
+    snap = await agent.poll_once()
+    inv = {e.name: e for e in snap.inventory}
+    comfy, echo = inv["voluptas_comfyui"], inv["echo"]
+    assert comfy.running and comfy.service == "comfyui" and comfy.project == "voluptas"
+    assert [(p.private, p.public) for p in comfy.ports] == [(8188, 8188)]  # IPv4 and IPv6 bindings fold into one
+    assert comfy.managed  # allow-listed
+    assert not echo.running and echo.host_network and echo.ports[0].public is None
+    assert not echo.managed  # labelled, but this agent has not opted in to the label
+
+
+def test_manage_label_is_opt_in_per_agent(host) -> None:
+    docker = FakeDocker()
+    agent = make_agent(host, docker)
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    with TestClient(create_app(agent=agent, poll=False)) as client:
+        assert client.post("/containers/echo/restart", headers=auth).status_code == 403
+    assert "GET /containers/echo/json" not in docker.calls  # no label lookup unless opted in
+    agent = make_agent(host, docker)  # the first app closed its Docker client on the way out
+    agent.settings = dataclasses.replace(agent.settings, manage_label="argus.iris.manage")
+    with TestClient(create_app(agent=agent, poll=False)) as client:
+        assert client.post("/containers/echo/restart", headers=auth).status_code == 200
+        # The label does not open containers that lack it.
+        assert client.post("/containers/postgres/stop", headers=auth).status_code == 403
+    assert "POST /containers/postgres/stop" not in docker.calls
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"), [("", None), ("0", None), ("1", "argus.iris.manage"), ("my.label", "my.label")]
+)
+def test_manage_label_setting(raw, want) -> None:
+    from argus_iris.agent.app import _label_setting
+
+    assert _label_setting(raw) == want
+
+
+async def test_announce_posts_node_with_agent_token(host) -> None:
+    agent = make_agent(host, FakeDocker())
+    agent.settings = dataclasses.replace(agent.settings, broker_url="http://broker:8120", advertise_url=None)
+    seen: list[httpx.Request] = []
+
+    def broker(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"status": "added"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(broker)) as client:
+        assert await agent.announce(client)
+    req = seen[0]
+    assert req.url == "http://broker:8120/nodes" and req.headers["authorization"] == f"Bearer {TOKEN}"
+    assert json.loads(req.content) == {"name": "morpheus", "agent_url": None, "port": 9110, "gpu": 0}

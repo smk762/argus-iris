@@ -272,6 +272,18 @@ Every repo that uses a GPU, inside the suite or not, commits `gpu-tenant.yaml`. 
 (`gpu-tenant-schema.json`, generated and drift-tested like the taxonomy and provenance schemas). A service POSTs its
 manifest to iris on startup; iris also accepts manifests from its config directory for tenants that never call it.
 
+**Self-registration** (2026-11-23). Adding or removing a GPU service needs only the broker URL and token on the
+service. A registered manifest's residents become services without an `iris.yaml` entry: the agents report every
+container on their hosts (`inventory` in the snapshot, with compose labels and published ports), and a resident lands on
+the node whose agent has its container, at that node's host and the container's published port (`port` disambiguates).
+The caller's host is never trusted, so a registration cannot point the broker, or a token, anywhere but a node. The
+admin token for `admin_auth` routes comes with the registration (`X-Argus-Admin-Token`) and goes only to that tenant's
+services. Configured entries win. A sign-off (`DELETE /tenants/{t}`, sent on every client shutdown) lapses the
+registration; its services stay while their containers exist, since iris may have stopped them, and go when the
+container is removed. Agents announce themselves the same way (`POST /nodes`, with the agent token), so a new GPU host
+needs no broker config. Starting a registered container still needs that host's consent: its agent's allowlist, or the
+`argus.iris.manage` label where the agent opted in to it (`IRIS_AGENT_MANAGE_LABEL`).
+
 ```yaml
 tenant: argus-darkroom
 kinds:
@@ -305,7 +317,10 @@ through cortex's `WriteGuard` and take an optional `Authorization: Bearer <ARGUS
 | `GET` | `/leases/{id}?wait_s=N` | `LeaseStatus`, long-polled until the state changes or N elapses. `404` when unknown; the client re-POSTs. |
 | `POST` | `/leases/{id}/heartbeat` | `Heartbeat` (`peak_vram_mb`) → `HeartbeatReply` (`state`, `yield_requested`, `ttl_s`, `reason`). `404` when unknown; the client re-attaches with `resume`. |
 | `POST` | `/leases/{id}/release` | `LeaseRelease` (`outcome` ok / failed / oom / cancelled, `peak_vram_mb`, `detail`). `cancelled` on a queued lease drops it from the queue. |
-| `POST` | `/tenants` | Register a `TenantManifest`. |
+| `POST` | `/tenants` | Register a `TenantManifest` (headers `X-Argus-Admin-Token`, `X-Argus-Container-Id`); its residents become services where an agent reports their containers. |
+| `DELETE` | `/tenants/{tenant}` | Sign off: the registration lapses now. `?purge=true` drops it and its services at once. |
+| `GET` | `/services`, `/registry` | Every service with its origin (`config` or `tenant`); registered tenants with where each resident landed or why not, and nodes with theirs. |
+| `POST` | `/nodes` | An agent announces its node (agent token). `DELETE /nodes/{name}` forgets an announced one. |
 | `GET` | `/nodes`, `/residents`, `/queue`, `/stats` | State for the dashboard and for operators. |
 | `POST` | `/services/{id}/warm` | Manual: start the service's container through its agent if the service is down, wait for its health check, then call its `warm_path`. A stopped service has no resident, so this targets the service. |
 | `POST` | `/residents/{id}/evict` | Manual eviction from the dashboard (step 4). |

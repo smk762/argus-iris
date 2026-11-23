@@ -2,9 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
-  <title>iris · GPU broker</title>
+  <title>argus iris · GPU broker</title>
+  <link rel="icon" href="brand/favicon.ico" sizes="48x48">
+  <link rel="icon" href="brand/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="brand/apple-icon.png">
   <script src="vendor/dh/dh-theme.js"></script>
   <link rel="stylesheet" href="vendor/dh/dh-tokens.css">
   <link rel="stylesheet" href="app.css">
@@ -13,33 +16,144 @@
 <body>
   <header class="bar">
     <div class="brand">
-      <h1>iris</h1>
-      <span class="chip" id="mode">observe-only</span>
+      <h1>
+        <img class="lockup lockup-light" src="brand/argus-iris-lockup-light.svg" alt="argus iris" width="138" height="26">
+        <img class="lockup lockup-dark" src="brand/argus-iris-lockup-dark.svg" alt="" width="138" height="26">
+      </h1>
+      <span class="chip" id="mode" title="admission mode">…</span>
       <span class="meta" id="version"></span>
     </div>
     <div class="status">
       <span class="pill" id="agents" data-state="unknown">agents …</span>
       <span class="pill" id="live" data-state="connecting"><span class="dot" aria-hidden="true"></span><span>connecting</span></span>
-      <button type="button" class="btn ghost" id="token-btn">Broker token</button>
+      <button type="button" class="btn ghost" id="token-btn" aria-describedby="token-state">Broker token</button>
+      <span class="sr-only" id="token-state">not set</span>
       <button type="button" class="btn ghost" data-dh-theme-toggle aria-label="Dark theme">Theme</button>
     </div>
   </header>
 
-  <main id="nodes" aria-live="polite">
-    <p class="empty" id="placeholder">Waiting for the broker's first poll…</p>
-  </main>
+  <div class="tabs">
+    <div class="tablist" role="tablist" aria-label="Dashboard views">
+      <button type="button" role="tab" id="tab-gpus" aria-selected="true">GPUs <span class="count" id="count-gpus"></span></button>
+      <button type="button" role="tab" id="tab-services" aria-selected="false" tabindex="-1">Services <span class="count" id="count-services"></span></button>
+      <button type="button" role="tab" id="tab-connect" aria-selected="false" tabindex="-1">Connect</button>
+    </div>
+
+    <section role="tabpanel" id="panel-gpus" aria-labelledby="tab-gpus">
+      <div class="summary" id="summary" aria-live="polite"></div>
+      <div id="nodes">
+        <p class="empty" id="placeholder">Waiting for the broker's first poll…</p>
+      </div>
+    </section>
+
+    <section role="tabpanel" id="panel-services" aria-labelledby="tab-services" hidden>
+      <div class="stack">
+        <p class="lede">Every service iris reads. <strong>config</strong> entries come from <code>iris.yaml</code>;
+          <strong>registered</strong> ones came from a tenant's <code>gpu-tenant.yaml</code> and were placed where a node
+          agent reports their container. Config wins where both name the same container.</p>
+        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="cap-services">
+          <table class="services-all">
+            <caption id="cap-services">Services</caption>
+            <thead><tr><th scope="col">Service</th><th scope="col">Node</th><th scope="col">Origin</th>
+              <th scope="col">Reached at</th><th scope="col">Status</th><th scope="col">Control</th>
+              <th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody><tr><td colspan="7" class="none">loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="cap-tenants">
+          <table class="tenants">
+            <caption id="cap-tenants">Registered tenants</caption>
+            <thead><tr><th scope="col">Tenant</th><th scope="col">Residents</th><th scope="col">Lease kinds</th>
+              <th scope="col">Last seen</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody><tr><td colspan="5" class="none">loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="cap-nodes">
+          <table class="node-list">
+            <caption id="cap-nodes">Nodes</caption>
+            <thead><tr><th scope="col">Node</th><th scope="col">Origin</th><th scope="col">Agent</th>
+              <th scope="col" class="num">Containers</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody><tr><td colspan="5" class="none">loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section role="tabpanel" id="panel-connect" aria-labelledby="tab-connect" hidden>
+      <div class="stack connect">
+        <article class="card">
+          <h2>Add a GPU service</h2>
+          <ol class="steps">
+            <li>Give the service its broker URL and token. With argus-cortex 0.15 that is all: the client finds
+              <code>gpu-tenant.yaml</code>, registers it at startup and renews it.</li>
+          </ol>
+          <div class="snippet">
+            <pre tabindex="0"><code id="snippet-env"></code></pre>
+            <span class="copy"><button type="button" class="btn ghost copy-button" data-copy="snippet-env" aria-label="Copy service environment">Copy</button><span class="copy-tip" role="status"></span></span>
+          </div>
+          <ol class="steps" start="2">
+            <li>List what it keeps loaded in its manifest. iris finds the container on whichever node runs it and uses
+              that node's address with the container's published port (<code>port</code> picks one when it publishes
+              several). An <code>admin_auth</code> resident gets the service's own <code>ARGUS_ADMIN_TOKEN</code>.</li>
+          </ol>
+          <div class="snippet">
+            <pre tabindex="0"><code id="snippet-manifest">tenant: my-service
+residents:
+  - name: my-model
+    adapter: argus-http
+    container: my-service-engine
+    port: 8000
+    vram_mb: 4000
+    unload_path: /admin/unload
+    warm_path: /admin/wake
+    admin_auth: true</code></pre>
+            <span class="copy"><button type="button" class="btn ghost copy-button" data-copy="snippet-manifest" aria-label="Copy manifest example">Copy</button><span class="copy-tip" role="status"></span></span>
+          </div>
+          <ol class="steps" start="3">
+            <li>Optional: let iris start and restart it. Label the container in its own compose file
+              (<code>labels: {argus.iris.manage: "true"}</code>) on a host whose agent sets
+              <code>IRIS_AGENT_MANAGE_LABEL=1</code>. Without it, iris still reads, evicts and warms it over HTTP.</li>
+          </ol>
+          <p class="meta">Removing it: stop the service. It signs off on shutdown; iris keeps it while its container
+            exists (so a warm can start it) and drops it once the container is removed, or at once with Forget.</p>
+        </article>
+        <article class="card">
+          <h2>Add a GPU host</h2>
+          <p>Run <code>iris-agent</code> there with the agent token and this broker's URL. It announces itself and
+            shows up as a node within a minute.</p>
+          <div class="snippet">
+            <pre tabindex="0"><code id="snippet-agent"></code></pre>
+            <span class="copy"><button type="button" class="btn ghost copy-button" data-copy="snippet-agent" aria-label="Copy agent environment">Copy</button><span class="copy-tip" role="status"></span></span>
+          </div>
+          <p class="meta">Set <code>IRIS_AGENT_URL</code> only when the broker cannot reach the agent at the address its
+            announcement comes from.</p>
+        </article>
+      </div>
+    </section>
+  </div>
 
   <dialog id="token-dialog" aria-labelledby="token-title">
     <form method="dialog" id="token-form">
       <h2 id="token-title">Broker token</h2>
-      <p class="meta">Manual actions (warm) send <code>ARGUS_GPU_BROKER_TOKEN</code> as a bearer token. It is kept in this
-        tab's session storage only.</p>
+      <p class="meta">Manual actions (warm, evict, forget) send <code>ARGUS_GPU_BROKER_TOKEN</code> as a bearer token. It
+        is kept in this tab's session storage only.</p>
       <label for="token-input">Token</label>
-      <input id="token-input" type="password" autocomplete="off" spellcheck="false">
+      <input id="token-input" type="password" autocomplete="off" spellcheck="false" autofocus>
       <div class="actions">
         <button type="button" class="btn ghost" id="token-clear">Clear</button>
-        <button type="button" class="btn ghost" value="cancel" id="token-cancel">Cancel</button>
+        <button type="submit" class="btn ghost" value="cancel" formnovalidate>Cancel</button>
         <button type="submit" class="btn" value="save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+    <form method="dialog">
+      <h2 id="confirm-title">Forget?</h2>
+      <p id="confirm-body"></p>
+      <div class="actions">
+        <button type="submit" class="btn danger" value="confirm" id="confirm-go">Forget</button>
+        <button type="submit" class="btn ghost" value="cancel" autofocus>Cancel</button>
       </div>
     </form>
   </dialog>
@@ -52,6 +166,7 @@
         <h2 class="node-name"></h2>
         <span class="gpu meta"></span>
         <span class="pill reach"></span>
+        <span class="chip origin" hidden>announced</span>
         <span class="meta seen"></span>
       </header>
       <p class="node-error" hidden></p>
@@ -61,7 +176,7 @@
         <ul class="legend"></ul>
       </div>
       <div class="tables">
-        <div class="table-wrap">
+        <div class="table-wrap" tabindex="0" role="region">
           <table class="residents">
             <caption>Residents</caption>
             <thead><tr><th scope="col">Service</th><th scope="col">Model</th><th scope="col">Source</th>
@@ -70,7 +185,7 @@
             <tbody></tbody>
           </table>
         </div>
-        <div class="table-wrap">
+        <div class="table-wrap" tabindex="0" role="region">
           <table class="services">
             <caption>Services</caption>
             <thead><tr><th scope="col">Service</th><th scope="col">Adapter</th><th scope="col">Status</th>
@@ -78,7 +193,7 @@
             <tbody></tbody>
           </table>
         </div>
-        <div class="table-wrap wide">
+        <div class="table-wrap wide" tabindex="0" role="region">
           <table class="leases">
             <caption>Leases</caption>
             <thead><tr><th scope="col">Tenant · kind</th><th scope="col">Target</th><th scope="col">Class</th>

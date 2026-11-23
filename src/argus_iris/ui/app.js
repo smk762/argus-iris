@@ -1,5 +1,7 @@
 // iris dashboard: a thin client over the broker's own API. /events sends every node's state and every active lease on
-// connect and again on each change, so the page needs no polling. The broker decides; this page only shows (and asks for a warm).
+// connect and again on each change, so the GPU view needs no polling. The service registry (/services, /registry) is
+// re-read when a node changes (debounced) and every 20 s. The broker decides; this page only shows, and asks for a
+// warm, an evict or a forget.
 
 const api = (path) => new URL(`../${path}`, location.href);
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -11,6 +13,8 @@ const leases = new Map(); // lease_id -> LeaseRecord, queued or granted only
 const order = []; // node names in config order
 const colours = new Map(); // node -> Map(service -> slot), grows only: colour follows the service, never its rank
 let config = null;
+let services = null; // GET /services: every service, configured and registered (null until first read)
+let registry = null; // GET /registry: tenants (with placements) and nodes (with origin)
 
 // ---------- formatting ----------
 const gb = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(mb >= 10240 ? 0 : 1)} GB` : `${Math.round(mb)} MB`);
@@ -34,8 +38,21 @@ function el(tag, props = {}, ...kids) {
     else if (k.startsWith("data-") || k.startsWith("aria-") || k === "role" || k === "tabindex") n.setAttribute(k, v);
     else n[k] = v;
   }
-  n.append(...kids.filter((k) => k != null));
+  n.append(...kids.filter((k) => k != null && k !== false));
   return n;
+}
+const noRows = (cols, text) => [el("tr", {}, el("td", { colSpan: cols, class: "none", text }))];
+
+// Narrow tables stack into cards; each cell carries its column's name for the label the CSS prints.
+function labelCells(table) {
+  const heads = [...table.tHead.rows[0].cells].map((th) => th.textContent.trim());
+  for (const row of table.tBodies[0].rows) {
+    [...row.cells].forEach((td, i) => { if (td.colSpan === 1 && heads[i]) td.dataset.label = heads[i]; });
+  }
+}
+function fill(tbody, rows) {
+  tbody.replaceChildren(...rows);
+  labelCells(tbody.closest("table"));
 }
 
 // ---------- colour per service ----------
@@ -46,13 +63,15 @@ function slotFor(node, service) {
   return m.get(service);
 }
 const colourVar = (slot) => `var(--dh-cat-${slot || SLOTS})`; // slot 0 ("other") alone gets the last colour
+const serviceList = () => services ?? config?.services ?? [];
+const serviceById = (id) => serviceList().find((s) => s.id === id);
 function seedColours(state) {
-  // Configured services first, in config order, so a service keeps its colour whether or not it is loaded.
-  for (const s of config?.services ?? []) if (s.node === state.name) slotFor(state.name, s.id);
+  // Known services first, in their order, so a service keeps its colour whether or not it is loaded.
+  for (const s of serviceList()) if (s.node === state.name) slotFor(state.name, s.id);
   for (const r of state.residents) slotFor(state.name, r.service);
 }
 
-// ---------- rendering ----------
+// ---------- rendering: GPUs ----------
 function tile(label, value, sub) {
   return el("div", { class: "tile" }, el("div", { class: "label", text: label }), el("div", { class: "value", text: value }),
     sub ? el("div", { class: "sub", text: sub }) : null);
@@ -137,7 +156,7 @@ function renderResidents(node, state) {
   const tbody = $("table.residents tbody", node);
   const rows = [...state.residents].sort((a, b) => b.vram_mb - a.vram_mb);
   const age = since(state.last_seen) ?? 0;
-  tbody.replaceChildren(...(rows.length ? rows.map((r) => {
+  fill(tbody, rows.length ? rows.map((r) => {
     const slot = slotFor(state.name, r.service);
     const idle = r.idle_s == null ? null : r.idle_s + age;
     const modelState = r.detail?.model_state;
@@ -156,7 +175,7 @@ function renderResidents(node, state) {
       el("td", { class: `state ${r.busy ? "busy" : ""}`, title: r.policy?.note ?? null }, st + exp,
         pol ? el("span", { class: `svc-err ${r.policy.enforce ? "" : "would"}`, text: pol }) : null),
       evictCell(r));
-  }) : [el("tr", {}, el("td", { colSpan: 7, class: "none", text: "nothing resident" }))]));
+  }) : noRows(7, "nothing resident"));
 }
 
 // What the residency policy says: pinned, when idle-kill is due, what iris does next ("would" while not enforced).
@@ -172,16 +191,16 @@ function policyText(p) {
 // Residents iris can evict: those read through an adapter, while they hold VRAM. Observed processes have none, and
 // an external service only when it is configured to be stopped (evict_by: stop).
 function evictCell(r) {
-  const cell = el("td", {});
+  const cell = el("td", { class: "actions" });
   const freed = ["unloaded", "cpu"].includes(r.detail?.model_state);
-  const stop = r.source === "external" && config?.services?.find((s) => s.id === r.service)?.evict_by === "stop";
+  const stop = r.source === "external" && serviceById(r.service)?.evict_by === "stop";
   if (r.source === "process" || (r.source === "external" && !stop) || freed) return cell;
-  const btn = el("button", { type: "button", class: "btn ghost", text: stop ? "Stop" : "Evict", disabled: r.busy,
+  const btn = el("button", { type: "button", class: "btn ghost small", text: stop ? "Stop" : "Evict", disabled: r.busy,
     title: r.busy ? "busy: iris never interrupts work"
       : stop ? "stop its container: its clients fall back elsewhere; Warm starts it again"
       : "free its VRAM (to CPU where the service can, else unload)" });
   btn.addEventListener("click", () => runAction(`residents/${r.id.split("/").map(encodeURIComponent).join("/")}/evict`, r.id,
-    btn, cell, btn.textContent, stop ? "Stopping…" : "Evicting…", evictSummary));
+    btn, cell, { busyLabel: stop ? "Stopping…" : "Evicting…", summary: evictSummary }));
   cell.append(btn);
   const prev = lastResult.get(r.id);
   if (prev) cell.append(prev.cloneNode(true));
@@ -190,35 +209,44 @@ function evictCell(r) {
 const evictSummary = (b) => `${{ evict: "moved to CPU", stop: "stopped" }[b.action] ?? "unloaded"}: ${gb(b.before_mb - b.after_mb)} freed`
   + (b.residual_mb ? `, ${gb(b.residual_mb)} still held (restart frees it)` : "") + (b.confirmed ? "" : " (not confirmed)");
 
+function warmCell(id) {
+  const c = serviceById(id);
+  const cell = el("td", { class: "actions" });
+  if (!c || !(c.warm_path || c.container)) return cell;
+  const btn = el("button", { type: "button", class: "btn ghost small", text: "Warm", title: warmHint(c) });
+  btn.addEventListener("click", () => runAction(`services/${encodeURIComponent(id)}/warm`, `warm:${id}`, btn, cell,
+    { busyLabel: "Warming…", summary: warmSummary }));
+  cell.append(btn);
+  const prev = lastResult.get(`warm:${id}`);
+  if (prev) cell.append(prev.cloneNode(true));
+  return cell;
+}
+const warmHint = (c) => [c.container && `starts ${c.container} if it is down${c.managed === false ? " (if its agent allows it)" : ""}`,
+  c.warm_path && `then calls ${c.warm_path}`].filter(Boolean).join(", ");
+
 function renderServices(node, state) {
   const tbody = $("table.services tbody", node);
-  const cfg = new Map((config?.services ?? []).map((s) => [s.id, s]));
-  tbody.replaceChildren(...(state.services.length ? state.services.map((s) => {
-    const c = cfg.get(s.id);
+  fill(tbody, state.services.length ? state.services.map((s) => {
+    const c = serviceById(s.id);
     const q = s.queue_running == null && s.queue_pending == null ? "–" : `${s.queue_running ?? 0} / ${s.queue_pending ?? 0}`;
-    const canWarm = c && (c.warm_path || c.container);
     const status = el("td", {}, el("span", { class: s.up ? "status-up" : "status-down", text: s.up ? "up" : "down" }),
       s.error ? el("span", { class: "svc-err", text: s.error }) : null,
-      s.crowded_out ? el("span", { class: "svc-err", title: "pins, unmanaged processes and unloaded residues: nothing iris can evict", text: `needs ${gb(s.need_mb)}, only ${gb(s.room_mb)} can ever be free` }) : null);
-    const act = el("td", {});
-    if (canWarm) {
-      const btn = el("button", { type: "button", class: "btn ghost", text: "Warm", title: warmHint(c) });
-      btn.addEventListener("click", () => runAction(`services/${encodeURIComponent(s.id)}/warm`, s.id, btn, act, "Warm", "Warming…", warmSummary));
-      act.append(btn);
-      const prev = lastResult.get(s.id);
-      if (prev) act.append(prev.cloneNode(true));
-    }
-    return el("tr", {}, el("td", { text: s.id }), el("td", { class: "meta", text: s.adapter }), status,
-      el("td", { class: "num", title: "running / pending", text: q }), act);
-  }) : [el("tr", {}, el("td", { colSpan: 5, class: "none", text: "no services configured" }))]));
+      s.crowded_out ? el("span", { class: "svc-err alert", title: "pins, unmanaged processes and unloaded residues: nothing iris can evict", text: `needs ${gb(s.need_mb)}, only ${gb(s.room_mb)} can ever be free` }) : null);
+    return el("tr", {},
+      el("td", {}, s.id, c?.origin === "tenant" ? el("span", { class: "sub", text: `registered by ${c.tenant}` }) : null),
+      el("td", { class: "meta", text: s.adapter }), status,
+      el("td", { class: "num", title: "running / pending", text: q }), warmCell(s.id));
+  }) : noRows(5, "no services on this node"));
 }
-const warmHint = (c) => [c.container && `starts ${c.container} if it is down`, c.warm_path && `then calls ${c.warm_path}`].filter(Boolean).join(", ");
 
 function renderNode(state) {
   let node = document.getElementById(`node-${state.name}`);
   if (!node) {
     node = $("#node-tpl").content.firstElementChild.cloneNode(true);
     node.id = `node-${state.name}`;
+    for (const wrap of node.querySelectorAll(".table-wrap")) {
+      wrap.setAttribute("aria-label", `${state.name} ${$("caption", wrap).textContent.toLowerCase()}`);
+    }
     placeNode(node, state.name);
   }
   seedColours(state);
@@ -228,6 +256,7 @@ function renderNode(state) {
   const reach = $(".reach", node);
   reach.dataset.state = state.reachable ? "ok" : "bad";
   reach.textContent = state.reachable ? "agent up" : "agent unreachable";
+  $(".origin", node).hidden = nodeOrigin(state.name) !== "agent";
   const seen = $(".seen", node);
   seen.dataset.since = state.last_seen ?? "";
   seen.textContent = state.last_seen ? `seen ${dur(since(state.last_seen))} ago` : "never seen";
@@ -278,7 +307,7 @@ function renderLeases(name) {
   if (!node) return;
   const rows = [...leases.values()].filter((l) => l.node === name)
     .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
-  $("table.leases tbody", node).replaceChildren(...(rows.length ? rows.map((l) => {
+  fill($("table.leases tbody", node), rows.length ? rows.map((l) => {
     const from = l.granted_at ?? l.created_at;
     // fits=false: admission would have refused it. Observe-only grants it anyway; the row says so.
     const over = l.fits === false;
@@ -310,7 +339,8 @@ function renderLeases(name) {
         stall ? el("span", { class: "svc-err", text: stall }) : null,
         // A queued lease says what it waits for (evicting X, waiting for N MB): the point of looking at the queue.
         l.state === "queued" && l.reason ? el("span", { class: "svc-err", text: l.reason }) : null));
-  }) : [el("tr", {}, el("td", { colSpan: 7, class: "none", text: "no leases" }))]));
+  }) : noRows(7, "no leases"));
+  renderSummary();
 }
 
 function placeNode(node, name) {
@@ -321,12 +351,150 @@ function placeNode(node, name) {
   main.insertBefore(node, after ?? null);
 }
 
+// One card per node above the detail: how full it is, its leases, and anything that needs a look. Links to the node.
+function renderSummary() {
+  const cards = order.filter((n) => nodes.has(n)).map((name) => {
+    const s = nodes.get(name);
+    const L = s.ledger;
+    const mine = [...leases.values()].filter((l) => l.node === name);
+    const granted = mine.filter((l) => l.state === "granted").length;
+    const queued = mine.length - granted;
+    const crowded = s.services.filter((x) => x.crowded_out).map((x) => x.id);
+    const down = s.services.filter((x) => !x.up).map((x) => x.id);
+    const mini = el("div", { class: "mini", "aria-hidden": "true" });
+    if (L?.total_mb) {
+      for (const p of segments(s)) {
+        if (p.cls === "free" || p.cls === "held") continue;
+        mini.append(el("span", { class: p.cls, style: { "--c": p.c ?? "", "flex-basis": `${(p.mb / L.total_mb) * 100}%` } }));
+      }
+    }
+    const used = L ? L.total_mb - L.free_mb : null;
+    const notes = [
+      granted || queued ? `${granted} granted${queued ? `, ${queued} queued` : ""}` : "no leases",
+      down.length ? el("span", { class: "alert", text: `down: ${down.join(", ")}` }) : null,
+      crowded.length ? el("span", { class: "alert", text: `crowded out: ${crowded.join(", ")}` }) : null,
+    ].filter(Boolean).flatMap((n, i) => (i ? [" · ", n] : [n]));
+    return el("a", { class: "sum", href: `#node-${name}`, "data-reachable": String(s.reachable),
+      "aria-label": `${name}: ${s.reachable ? (L ? `${gb(used)} of ${gb(L.total_mb)} used` : "up") : "agent unreachable"}` },
+      el("div", { class: "top" }, el("span", { class: "name", text: name }),
+        s.reachable ? null : el("span", { class: "pill", "data-state": "bad", text: "unreachable" }),
+        el("span", { class: "meta", text: L ? `${gb(used)} / ${gb(L.total_mb)}` : "–" })),
+      mini, el("div", { class: "notes" }, ...notes));
+  });
+  $("#summary").replaceChildren(...cards);
+  const alerts = [...nodes.values()].some((s) => !s.reachable || s.services.some((x) => x.crowded_out));
+  const count = $("#count-gpus");
+  count.textContent = nodes.size ? String(nodes.size) : "";
+  count.toggleAttribute("data-alert", alerts);
+}
+
 function renderAgents() {
   const all = [...nodes.values()];
   const up = all.filter((n) => n.reachable).length;
   const pill = $("#agents");
   pill.textContent = `${up}/${all.length || order.length} agents`;
   pill.dataset.state = !all.length ? "unknown" : up === all.length ? "ok" : up ? "warn" : "bad";
+}
+
+// ---------- rendering: services, tenants, nodes (the registry) ----------
+const nodeOrigin = (name) => registry?.nodes?.find((n) => n.name === name)?.origin;
+const serviceState = (s) => nodes.get(s.node)?.services.find((x) => x.id === s.id);
+
+function renderRegistry() {
+  if (!services || !registry) return;
+  const cnt = $("#count-services");
+  cnt.textContent = String(services.length);
+  cnt.toggleAttribute("data-alert", registry.tenants.some((t) => t.placements.some((p) => p.reason)));
+
+  fill($("table.services-all tbody"), services.length ? services.map((s) => {
+    const st = serviceState(s);
+    const origin = s.origin === "tenant"
+      ? el("td", {}, el("span", { class: "chip tenant", text: "registered" }),
+        el("span", { class: "sub", text: s.tenant }), s.lapsed ? el("span", { class: "svc-err alert", text: "lapsed: kept while its container exists" }) : null)
+      : el("td", {}, el("span", { class: "chip", text: "config" }));
+    const status = st
+      ? el("td", {}, el("span", { class: st.up ? "status-up" : "status-down", text: st.up ? "up" : "down" }),
+        st.crowded_out ? el("span", { class: "svc-err alert", text: `crowded out: needs ${gb(st.need_mb)}` }) : null)
+      : el("td", { class: "meta", text: "not polled yet" });
+    const control = [
+      s.managed === true ? "agent can start it" : s.managed === false ? "agent won't start it" : null,
+      s.admin_token === true ? "admin token" : s.admin_token === false ? "no admin token" : null,
+    ].filter(Boolean);
+    return el("tr", {},
+      el("td", {}, s.id, s.serves?.length ? el("span", { class: "sub", text: `also answers ${s.serves.join(", ")}` }) : null),
+      el("td", { text: s.node }),
+      origin,
+      el("td", {}, el("code", { text: s.base_url }), s.container ? el("span", { class: "sub", text: `container ${s.container}` }) : null),
+      status,
+      el("td", { class: "meta" }, s.adapter, ...control.map((t) => el("span", { class: "sub", text: t }))),
+      warmCell(s.id));
+  }) : noRows(7, "no services yet"));
+
+  fill($("table.tenants tbody"), registry.tenants.length ? registry.tenants.map((t) => {
+    const cell = el("td", { class: "actions" });
+    const btn = el("button", { type: "button", class: "btn ghost small", text: "Forget",
+      title: "drop its registration and services now; a running client registers again on its next renewal" });
+    btn.addEventListener("click", () => forget(`tenants/${encodeURIComponent(t.tenant)}?purge=true`, `tenant:${t.tenant}`, btn, cell,
+      `Forget ${t.tenant}?`, `Its registration and the ${t.placements.filter((p) => p.service).length} service(s) it brought go now. If it is still running it registers again within five minutes.`));
+    cell.append(btn);
+    return el("tr", {},
+      el("td", {}, t.tenant, t.repo ? el("span", { class: "sub", text: t.repo }) : null),
+      el("td", {}, t.placements.length
+        ? el("ul", { class: "placements" }, ...t.placements.map((p) => el("li", {},
+          el("strong", { text: p.resident }), " → ",
+          p.service ? `${p.node}/${p.service}` : p.covered_by ? `${p.node}: read by config's ${p.covered_by}` : el("span", { class: "why", text: p.reason }))))
+        : el("span", { class: "meta", text: "no residents (leases only)" })),
+      el("td", { class: "meta", text: t.kinds.join(", ") || "–" }),
+      el("td", { class: "num" }, `${dur(since(t.seen_at))} ago`,
+        t.lapsed ? el("span", { class: "sub", text: "lapsed" }) : null,
+        t.needs_admin_token && !t.admin_token ? el("span", { class: "sub alert", text: "no admin token: its admin routes will refuse iris" }) : null),
+      cell);
+  }) : noRows(5, "No tenant has registered yet. Services register when their cortex client starts, or with their first lease."));
+
+  fill($("table.node-list tbody"), registry.nodes.map((n) => {
+    const cell = el("td", { class: "actions" });
+    if (n.origin === "agent") {
+      const btn = el("button", { type: "button", class: "btn ghost small", text: "Forget" });
+      btn.addEventListener("click", () => forget(`nodes/${encodeURIComponent(n.name)}`, `node:${n.name}`, btn, cell,
+        `Forget node ${n.name}?`, "iris stops polling it and its services. If its agent is still running it announces itself again within a minute."));
+      cell.append(btn);
+    }
+    const st = nodes.get(n.name);
+    return el("tr", {},
+      el("td", {}, n.name, st?.gpu ? el("span", { class: "sub", text: st.gpu.name }) : null),
+      el("td", {}, el("span", { class: n.origin === "agent" ? "chip tenant" : "chip", text: n.origin === "agent" ? "announced" : "config" })),
+      el("td", {}, el("code", { text: n.agent_url }),
+        st ? el("span", { class: `sub ${st.reachable ? "status-up" : "status-down"}`, text: st.reachable ? "up" : "unreachable" }) : null),
+      el("td", { class: "num", text: n.containers ?? "–", title: n.containers == null ? "the agent does not list containers (older than this broker?)" : null }),
+      cell);
+  }));
+}
+
+let registryTimer = null;
+async function loadRegistry() {
+  try {
+    const [s, r] = await Promise.all([fetch(api("services")), fetch(api("registry"))]);
+    if (!s.ok || !r.ok) throw new Error(`HTTP ${s.ok ? r.status : s.status}`);
+    [services, registry] = [await s.json(), await r.json()];
+  } catch (e) {
+    if (!services) fill($("table.services-all tbody"), noRows(7, `Could not read the registry: ${e.message}`));
+    return;
+  }
+  // A forgotten node: drop its card and summary.
+  const known = new Set(registry.nodes.map((n) => n.name));
+  for (const name of [...nodes.keys()]) {
+    if (known.has(name)) continue;
+    nodes.delete(name);
+    order.splice(order.indexOf(name), 1);
+    document.getElementById(`node-${name}`)?.remove();
+  }
+  renderRegistry();
+  renderAgents();
+  for (const s of nodes.values()) renderNode(s); // origins, warm buttons and colours follow the registry
+}
+function scheduleRegistry(ms = 1500) {
+  clearTimeout(registryTimer);
+  registryTimer = setTimeout(loadRegistry, ms);
 }
 
 // Ages tick locally between events.
@@ -339,32 +507,55 @@ setInterval(() => {
     td.textContent = dur(Number(td.dataset.idle) + (Date.now() - Number(td.dataset.at)) / 1000);
   }
 }, 1000);
+setInterval(loadRegistry, 20000);
 
-// ---------- warm ----------
-const lastResult = new Map(); // service or resident id -> result element (kept across re-renders)
+// ---------- actions ----------
+const lastResult = new Map(); // action key -> result element (kept across re-renders)
 const warmSummary = (b) => (b.up ? "" : "still down: ")
   + (b.detail ?? [b.started_container && "container started", b.warmed && "warmed", `up after ${b.waited_s.toFixed(1)}s`].filter(Boolean).join(", "));
-async function runAction(path, key, btn, cell, label, busyLabel, summary) {
+async function runAction(path, key, btn, cell, { method = "POST", busyLabel, summary }) {
   let token = sessionStorage.getItem(TOKEN_KEY);
   if (!token) token = await askToken();
-  if (!token) return;
+  if (!token) return null;
+  const label = btn.textContent;
   btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
   btn.textContent = busyLabel;
-  let msg;
+  let msg, ok = false;
   try {
-    const res = await fetch(api(path), { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+    const res = await fetch(api(path), { method, headers: { Authorization: `Bearer ${token}` } });
     const body = await res.json().catch(() => ({}));
-    if (res.status === 401) sessionStorage.removeItem(TOKEN_KEY);
-    const ok = res.ok && body.up !== false && body.confirmed !== false;
-    msg = el("span", { class: `result ${ok ? "ok" : "err"}`, text: res.ok ? summary(body) : `${res.status}: ${body.detail ?? res.statusText}` });
+    if (res.status === 401) { sessionStorage.removeItem(TOKEN_KEY); showTokenState(); }
+    ok = res.ok && body.up !== false && body.confirmed !== false;
+    msg = el("span", { class: `result ${ok ? "ok" : "err"}`, role: "status",
+      text: res.ok ? summary(body) : `${res.status}: ${body.detail ?? res.statusText}` });
   } catch (e) {
-    msg = el("span", { class: "result err", text: String(e) });
+    msg = el("span", { class: "result err", role: "status", text: String(e) });
   }
   lastResult.set(key, msg);
   btn.disabled = false;
+  btn.removeAttribute("aria-busy");
   btn.textContent = label;
   cell.querySelector(".result")?.remove();
   cell.append(msg.cloneNode(true));
+  return ok;
+}
+
+const confirmDlg = $("#confirm-dialog");
+function confirmForget(title, body) {
+  $("#confirm-title").textContent = title;
+  $("#confirm-body").textContent = body;
+  confirmDlg.returnValue = "";
+  confirmDlg.showModal();
+  return new Promise((resolve) => confirmDlg.addEventListener("close", () => {
+    resolve(confirmDlg.returnValue === "confirm");
+    confirmDlg.returnValue = "";
+  }, { once: true }));
+}
+async function forget(path, key, btn, cell, title, body) {
+  if (!(await confirmForget(title, body))) return;
+  const ok = await runAction(path, key, btn, cell, { method: "DELETE", busyLabel: "Forgetting…", summary: () => "forgotten" });
+  if (ok) loadRegistry();
 }
 
 // ---------- token dialog ----------
@@ -372,23 +563,128 @@ const dlg = $("#token-dialog");
 let tokenResolve = null;
 function askToken() {
   $("#token-input").value = sessionStorage.getItem(TOKEN_KEY) ?? "";
+  dlg.returnValue = "";
   dlg.showModal();
   return new Promise((r) => (tokenResolve = r));
 }
+function showTokenState() {
+  const set = Boolean(sessionStorage.getItem(TOKEN_KEY));
+  $("#token-btn").textContent = set ? "Broker token ✓" : "Broker token";
+  $("#token-state").textContent = set ? "set for this tab" : "not set";
+}
 $("#token-btn").addEventListener("click", () => askToken());
-$("#token-cancel").addEventListener("click", () => dlg.close("cancel"));
-$("#token-clear").addEventListener("click", () => { sessionStorage.removeItem(TOKEN_KEY); $("#token-input").value = ""; dlg.close("cancel"); });
-$("#token-form").addEventListener("submit", () => {
+$("#token-clear").addEventListener("click", () => { sessionStorage.removeItem(TOKEN_KEY); $("#token-input").value = ""; dlg.close(""); });
+$("#token-form").addEventListener("submit", (e) => {
+  if (e.submitter?.value !== "save") return;
   const v = $("#token-input").value.trim();
   if (v) sessionStorage.setItem(TOKEN_KEY, v);
 });
 dlg.addEventListener("close", () => {
   const v = dlg.returnValue === "save" ? sessionStorage.getItem(TOKEN_KEY) : null;
+  dlg.returnValue = "";
   tokenResolve?.(v);
   tokenResolve = null;
-  $("#token-btn").textContent = sessionStorage.getItem(TOKEN_KEY) ? "Broker token ✓" : "Broker token";
+  showTokenState();
 });
-$("#token-btn").textContent = sessionStorage.getItem(TOKEN_KEY) ? "Broker token ✓" : "Broker token";
+showTokenState();
+
+// ---------- tabs ----------
+// Selection follows focus (arrow keys, Home, End). Hidden panels stay findable with find-in-page where supported.
+const tabs = [...document.querySelectorAll('[role="tab"]')];
+const panelOf = (tab) => document.getElementById(tab.id.replace("tab-", "panel-"));
+function select(tab, focus = false) {
+  for (const t of tabs) {
+    const on = t === tab;
+    t.setAttribute("aria-selected", String(on));
+    t.tabIndex = on ? 0 : -1;
+    const panel = panelOf(t);
+    if (on) panel.removeAttribute("hidden");
+    else panel.hidden = "until-found";
+  }
+  if (focus) tab.focus();
+  tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+  try { sessionStorage.setItem("iris-tab", tab.id); } catch { /* storage blocked: the tab is not remembered */ }
+  if (tab.id === "tab-gpus") requestAnimationFrame(() => { for (const b of document.querySelectorAll(".seg-bar")) fitLabels(b); });
+}
+for (const tab of tabs) {
+  tab.addEventListener("click", () => select(tab));
+  tab.addEventListener("keydown", (e) => {
+    const i = tabs.indexOf(tab);
+    const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (next == null) return;
+    e.preventDefault();
+    select(tabs[(next + tabs.length) % tabs.length], true);
+  });
+  panelOf(tab).addEventListener("beforematch", () => select(tab));
+}
+for (const t of tabs) if (t.getAttribute("aria-selected") !== "true") panelOf(t).hidden = "until-found";
+// A summary card links to its node: show the GPUs view first.
+document.addEventListener("click", (e) => { if (e.target.closest?.('a[href^="#node-"]')) select(tabs[0]); });
+{
+  let saved = null;
+  try { saved = sessionStorage.getItem("iris-tab"); } catch { /* ignore */ }
+  // A link to /ui/#services or #connect opens that view; otherwise the one this tab last showed.
+  const linked = tabs.find((t) => `#${t.id.replace("tab-", "")}` === location.hash);
+  const tab = linked ?? tabs.find((t) => t.id === saved);
+  if (tab) select(tab);
+}
+
+// ---------- copy buttons ----------
+const copyTimers = new WeakMap();
+let lastCopyMessage = "";
+function legacyCopy(text) {
+  // The dashboard is usually plain http on the LAN, where navigator.clipboard does not exist.
+  const field = Object.assign(document.createElement("textarea"), { value: text });
+  field.setAttribute("readonly", "");
+  field.style.cssText = "position:fixed;inset-block-start:0;opacity:0";
+  document.body.append(field);
+  field.select();
+  try { return document.execCommand("copy"); } finally { field.remove(); }
+}
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return legacyCopy(text);
+  }
+}
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest?.("button[data-copy]");
+  if (!btn) return;
+  const ok = await copyText(document.getElementById(btn.dataset.copy).innerText.trim());
+  const tip = btn.nextElementSibling;
+  clearTimeout(copyTimers.get(btn));
+  btn.removeAttribute("data-copied");
+  btn.removeAttribute("data-failed");
+  btn.setAttribute(ok ? "data-copied" : "data-failed", "");
+  let message = ok ? "Copied" : "Copy failed: select the text instead";
+  if (message === lastCopyMessage) message += " "; // VoiceOver skips a repeat of the same message
+  lastCopyMessage = message;
+  tip.textContent = "";
+  requestAnimationFrame(() => (tip.textContent = message));
+  copyTimers.set(btn, setTimeout(() => {
+    btn.removeAttribute("data-copied");
+    btn.removeAttribute("data-failed");
+    tip.textContent = "";
+  }, 2000));
+});
+function renderSnippets() {
+  const origin = new URL(api("")).origin;
+  $("#snippet-env").textContent = [
+    `ARGUS_GPU_BROKER_URL=${origin}`,
+    "ARGUS_GPU_BROKER_TOKEN=<the broker's ARGUS_GPU_BROKER_TOKEN>",
+    "# only if its manifest has admin_auth residents (usually already set):",
+    "ARGUS_ADMIN_TOKEN=<the service's own admin token>",
+  ].join("\n");
+  $("#snippet-agent").textContent = [
+    "IRIS_AGENT_NODE=<a short name for this GPU, e.g. jarrah>",
+    "IRIS_AGENT_TOKEN=<the broker's IRIS_AGENT_TOKEN>",
+    `IRIS_BROKER_URL=${origin}`,
+    "IRIS_AGENT_MANAGE_LABEL=1   # optional: allow containers labelled argus.iris.manage=true",
+  ].join("\n");
+}
+renderSnippets();
 
 // ---------- tooltip (hover and keyboard focus) ----------
 const tip = $("#tip");
@@ -404,9 +700,11 @@ document.addEventListener("pointermove", (e) => { const t = e.target.closest?.("
 document.addEventListener("pointerout", (e) => { if (e.target.closest?.("[data-tip-title]")) tip.hidden = true; });
 document.addEventListener("focusin", (e) => { const t = e.target.closest?.("[data-tip-title]"); if (t) { const r = t.getBoundingClientRect(); showTip(t, r.left + r.width / 2, r.top); } });
 document.addEventListener("focusout", () => (tip.hidden = true));
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") tip.hidden = true; });
 
 // ---------- data ----------
-window.addEventListener("dh-theme-change", () => requestAnimationFrame(() => inkFor(document)));
+// dh-theme dispatches its change event on document, and it does not bubble to window.
+document.addEventListener("dh-theme-change", () => requestAnimationFrame(() => inkFor(document)));
 window.addEventListener("resize", () => { for (const b of document.querySelectorAll(".seg-bar")) fitLabels(b); });
 
 // The browser retries a dropped stream by itself, but gives up for good (CLOSED) on an answer that is not an event
@@ -429,10 +727,14 @@ async function boot() {
     config = c;
     order.push(...Object.keys(c.nodes));
     $("#version").textContent = `v${h.version}`;
-    $("#mode").textContent = h.mode ?? "observe-only";
+    const mode = $("#mode");
+    mode.textContent = c.admission === "enforce" ? "admission · enforce" : "observe-only";
+    mode.dataset.mode = c.admission;
+    mode.title = c.admission === "enforce" ? "admission enforced: leases queue, spill and evict" : "observe-only: every lease is granted, and whether it would have fit is recorded";
   } catch (e) {
     $("#placeholder").textContent = `Could not reach the broker: ${e}`;
   }
+  loadRegistry();
   const live = $("#live");
   const setLive = (state, text) => { live.dataset.state = state; live.lastElementChild.textContent = text; };
   connectEvents(setLive, {
@@ -453,10 +755,16 @@ async function boot() {
     },
     node: (e) => {
       const state = JSON.parse(e.data);
-      if (!order.includes(state.name)) order.push(state.name);
+      if (!order.includes(state.name)) { order.push(state.name); scheduleRegistry(0); }
+      const was = nodes.get(state.name);
       nodes.set(state.name, state);
       renderNode(state);
       renderAgents();
+      renderSummary();
+      // A service appearing or going on a node is a registry change: re-read it soon.
+      const ids = (s) => s?.services.map((x) => x.id).join() ?? "";
+      if (ids(was) !== ids(state)) scheduleRegistry();
+      else if (services) renderRegistry();
     },
   });
 }

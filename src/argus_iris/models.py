@@ -59,6 +59,28 @@ class ContainerMemory(BaseModel):
     anon_mb: int  # cgroup memory.stat ``anon``: what restarting the container gives back
 
 
+class PortMap(BaseModel):
+    private: int  # the port inside the container
+    public: int | None = None  # the host port it is published on; None when it is not published
+    proto: str = "tcp"
+
+
+class ContainerEntry(BaseModel):
+    """One container on the agent's host, running or not: how the broker finds a registered tenant's resident (its
+    node and published port) without anyone writing it into the broker's config."""
+
+    id: str
+    name: str
+    service: str | None = None  # compose service label
+    project: str | None = None  # compose project label
+    running: bool
+    host_network: bool = False  # network_mode: host, so its ports are the host's own
+    ports: list[PortMap] = Field(default_factory=list)
+    # The agent would start, stop or restart it: on IRIS_AGENT_CONTAINERS, or labelled argus.iris.manage=true where
+    # the agent opted in to the label (IRIS_AGENT_MANAGE_LABEL).
+    managed: bool = False
+
+
 class NodeSnapshot(BaseModel):
     version: str = SNAPSHOT_VERSION
     node: str
@@ -69,6 +91,8 @@ class NodeSnapshot(BaseModel):
     host: HostMemory | None = None
     containers: list[ContainerMemory] = Field(default_factory=list)
     nvml_error: str | None = None
+    # Every container on the host. None from an agent too old to list them (or while Docker is unreachable).
+    inventory: list[ContainerEntry] | None = None
 
 
 class ContainerAction(StrEnum):

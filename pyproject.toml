@@ -33,7 +33,7 @@ server = [
     "uvicorn>=0.27",
     "httpx>=0.27",
     "prometheus-client>=0.20",
-    "argus-cortex[server]>=0.7,<0.8",
+    "argus-cortex[server]>=0.14,<0.16",
     "tzdata>=2024.1",  # the policy file's timezone, where the image has no system zoneinfo
 ]
 # iris-agent, the per-host GPU sampler. Talks to Docker over its Unix socket with httpx (no Docker SDK).

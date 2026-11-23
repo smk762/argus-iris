@@ -13,9 +13,12 @@ services:
       - ${IRIS_CONFIG_FILE:-./iris.yaml}:/etc/argus-iris/iris.yaml:ro
       # Residency policy. The default is the shipped example, which only reports (no rule enforces).
       - ${IRIS_POLICY_FILE:-./policy.example.yaml}:/etc/argus-iris/policy.yaml:ro
+      # Registrations (tenant manifests, the admin tokens they came with, announced nodes) across restarts.
+      - iris-state:/var/lib/argus-iris
     environment:
       IRIS_CONFIG: /etc/argus-iris/iris.yaml
       IRIS_POLICY: /etc/argus-iris/policy.yaml
+      IRIS_STATE_DIR: /var/lib/argus-iris
       # Callers' token (what argus-cortex's client sends). Manual actions such as warm are disabled while unset.
       ARGUS_GPU_BROKER_TOKEN: ${ARGUS_GPU_BROKER_TOKEN:-}
       # Sent to the agents for container actions; must match each agent's IRIS_AGENT_TOKEN.
@@ -25,3 +28,6 @@ services:
       RAG_CHAT_API_KEY: ${RAG_CHAT_API_KEY:-}
       LENS_ADMIN_TOKEN: ${LENS_ADMIN_TOKEN:-}
       ECHO_ADMIN_TOKEN: ${ECHO_ADMIN_TOKEN:-}   # argus-echo engines' ARGUS_ADMIN_TOKEN (the same on every host)
+
+volumes:
+  iris-state: {}
