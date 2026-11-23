@@ -325,13 +325,18 @@ def create_app(
         }
 
     @app.delete("/tenants/{tenant}")
-    async def forget_tenant(tenant: str, purge: bool = False, authorization: str | None = Header(default=None)) -> dict:
+    async def forget_tenant(
+        tenant: str,
+        purge: bool = False,
+        authorization: str | None = Header(default=None),
+        x_argus_container_id: str | None = Header(default=None),
+    ) -> dict:
         """A tenant signs off (cortex's client, on shutdown): its registration lapses now, and its services stay while
         their containers exist, since iris may be the one that stopped them. ``purge=true`` (the dashboard's Forget)
         drops the registration, its services and its manifest at once; a client still running registers again on
         its next renewal."""
         check_caller(authorization, required=False)
-        known = broker.registry.forget(tenant, purge=purge)
+        known = broker.registry.forget(tenant, purge=purge, container_id=x_argus_container_id)
         if purge:
             known = leases.tenants.pop(tenant, None) is not None or known
         if not known:

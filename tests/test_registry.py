@@ -206,7 +206,7 @@ def test_registrations_survive_a_restart_in_a_private_file(tmp_path: Path) -> No
 
     again, _ = registry(tmp_path)
     again.load()
-    assert again.tenants["argus-echo"].manifest == ECHO and again.tenants["argus-echo"].token == "echo-admin"
+    assert again.tenants["argus-echo"].manifest == ECHO and again.tenants["argus-echo"].token_for() == "echo-admin"
     assert again.config.nodes["jarrah"].agent_url == "http://192.168.1.109:9110"
 
 
@@ -274,7 +274,7 @@ async def test_register_then_poll_reads_the_new_service(api) -> None:
         headers={**auth, "X-Argus-Admin-Token": "echo-admin", "X-Argus-Container-Id": "not-an-id"},
     )
     assert r.status_code == 200 and r.json()["changed"]
-    assert broker.registry.tenants["argus-echo"].container_id is None  # a malformed id is ignored, not trusted
+    assert list(broker.registry.tenants["argus-echo"].instances) == [""]  # a malformed id is ignored, not trusted
 
     await broker.poll_once()
     services = {s["id"]: s for s in client.get("/services").json()}
@@ -325,3 +325,39 @@ def test_operator_tokens_never_reach_a_registered_host(monkeypatch) -> None:
         id="x", node="dragon", adapter="argus-http", base_url="http://h:1", token_env="SECRET", tenant="t", resident="x"
     )
     assert svc.headers() == {}
+
+
+def test_several_processes_register_one_tenant() -> None:
+    """argus-echo: each engine is its own process and container, registering the same tenant."""
+    xtts_id, whisper_id = "a" * 64, "b" * 64
+    reg, clock = registry(services=[])
+    assert reg.register(ECHO, token="xtts-token", container_id=xtts_id)
+    assert reg.register(ECHO, token="whisper-token", container_id=whisper_id)  # a new instance is a change
+    assert not reg.register(ECHO, token="xtts-token", container_id=xtts_id)  # a renewal is not
+    reg.observe(
+        "dragon",
+        [entry("argus-echo-xtts", (8141, 8141), id=xtts_id), entry("argus-echo-whisper", (8144, 8144), id=whisper_id)],
+    )
+    reg.reconcile()
+    by_id = {s.id: s for s in reg.services}
+    # Each resident gets the token of the process in its own container, whichever renewed last.
+    assert by_id["xtts"].headers() == {"Authorization": "Bearer xtts-token"}
+    whisper = ECHO.residents[1]
+    assert not whisper.admin_auth and by_id["whisper"].headers() == {}
+
+    # One engine signing off lapses only itself; the tenant lapses once every instance has.
+    reg.forget("argus-echo", container_id=xtts_id)
+    assert not reg.lapsed(reg.tenants["argus-echo"])
+    reg.forget("argus-echo", container_id=whisper_id)
+    assert reg.lapsed(reg.tenants["argus-echo"])
+    assert [s.id for s in reg.services] == ["xtts", "whisper"]  # containers still there: kept
+
+
+def test_registration_file_keeps_instances(tmp_path: Path) -> None:
+    reg, _ = registry(tmp_path)
+    reg.register(ECHO, token="t1", container_id="a" * 64)
+    reg.register(ECHO, token="t2", container_id="b" * 64)
+    again, _ = registry(tmp_path)
+    again.load()
+    inst = again.tenants["argus-echo"].instances
+    assert {k: v.token for k, v in inst.items()} == {"a" * 64: "t1", "b" * 64: "t2"}

@@ -60,12 +60,36 @@ class RegistrationError(ValueError):
 
 
 @dataclass
+class Instance:
+    """One process registering a tenant: several can (argus-echo's engines, each in its own container, one tenant)."""
+
+    token: str | None
+    seen_at: datetime
+
+
+@dataclass
 class Registration:
     manifest: TenantManifest
-    token: str | None
-    container_id: str | None  # the registering process's own container, when the client could tell
     registered_at: datetime
-    seen_at: datetime
+    # Container id of each registering process ("" when it could not tell) -> its token and last renewal.
+    instances: dict[str, Instance] = field(default_factory=dict)
+
+    @property
+    def seen_at(self) -> datetime:
+        return max(i.seen_at for i in self.instances.values())
+
+    @property
+    def container_ids(self) -> list[str]:
+        return [cid for cid in self.instances if cid]
+
+    def token_for(self, container_id: str | None = None) -> str | None:
+        """The admin token of the instance running in *container_id*, else the one renewed last that sent any."""
+        if container_id:
+            for cid, inst in self.instances.items():
+                if cid and (container_id.startswith(cid) or cid.startswith(container_id)) and inst.token:
+                    return inst.token
+        ranked = sorted(self.instances.values(), key=lambda i: i.seen_at, reverse=True)
+        return next((i.token for i in ranked if i.token), None)
 
 
 @dataclass
@@ -111,11 +135,20 @@ class Registry:
         container_id = container_id.strip().lower() if container_id else None
         if container_id and not CONTAINER_ID.fullmatch(container_id):
             container_id = None  # not a Docker id: ignore it rather than refuse the registration
-        was = self.tenants.get(manifest.tenant)
-        changed = was is None or (was.manifest, was.token, was.container_id) != (manifest, token, container_id)
-        self.tenants[manifest.tenant] = Registration(
-            manifest, token or None, container_id, was.registered_at if was and not changed else now, now
-        )
+        token = token or None
+        key = container_id or ""
+        reg = self.tenants.get(manifest.tenant)
+        if reg is None or reg.manifest != manifest:
+            reg = self.tenants[manifest.tenant] = Registration(manifest, now, dict(reg.instances) if reg else {})
+            changed = True
+        else:
+            inst = reg.instances.get(key)
+            changed = inst is None or inst.token != token
+        reg.instances[key] = Instance(token, now)
+        # Instances gone well past the lapse (containers recreated under new ids) are dropped, so the map stays small.
+        stale = now - timedelta(seconds=4 * self.config.registration_ttl_s)
+        for cid in [c for c, i in reg.instances.items() if i.seen_at < stale]:
+            del reg.instances[cid]
         if changed:
             log.info(
                 "tenant_registration",
@@ -127,22 +160,28 @@ class Registry:
         self.save() if changed else self._touch()
         return changed
 
-    def forget(self, tenant: str, *, purge: bool = False) -> bool:
+    def forget(self, tenant: str, *, purge: bool = False, container_id: str | None = None) -> bool:
         """A tenant signed off. cortex's client does this on every shutdown, including when iris itself stopped its
         container, so by default it only lapses the registration now: its services stay while their containers exist,
-        and a warm can still start them. *purge* drops it and its services at once (the dashboard's Forget)."""
+        and a warm can still start them. With *container_id*, only that instance lapses (one of argus-echo's engines
+        stopping says nothing about the others). *purge* drops it and its services at once (the dashboard's Forget)."""
         reg = self.tenants.get(tenant)
         if reg is None:
             return False
         if purge:
             del self.tenants[tenant]
         else:
-            reg.seen_at = min(reg.seen_at, self.clock() - timedelta(seconds=self.config.registration_ttl_s + 1))
-        log.info("tenant_forgotten" if purge else "tenant_signed_off", tenant=tenant)
+            gone = self.clock() - timedelta(seconds=self.config.registration_ttl_s + 1)
+            cid = (container_id or "").strip().lower()
+            for key, inst in reg.instances.items():
+                if not cid or key == cid:
+                    inst.seen_at = min(inst.seen_at, gone)
+        log.info("tenant_forgotten" if purge else "tenant_signed_off", tenant=tenant, container_id=container_id)
         self.save()
         return True
 
     def lapsed(self, reg: Registration) -> bool:
+        """Every instance has gone without renewing for registration_ttl_s (or signed off)."""
         return self.clock() - reg.seen_at > timedelta(seconds=self.config.registration_ttl_s)
 
     # ── nodes ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -212,7 +251,8 @@ class Registry:
         for svc in services:  # tokens can change without the service doing so
             reg = self.tenants[svc.tenant]
             res = next(r for r in reg.manifest.residents if r.name == svc.resident)
-            svc.with_token(reg.token if res.admin_auth else None)
+            entry = next((e for e in self.inventory.get(svc.node, []) if e.name == svc.container), None)
+            svc.with_token(reg.token_for(entry.id if entry else None) if res.admin_auth else None)
         self.services, self.placements = services, placements
         self.config.services[:] = [*self.configured, *services]
         if changed:
@@ -295,14 +335,12 @@ class Registry:
             inv = self.inventory.get(node) or []
             if r.container:
                 hits = [e for e in inv if e.name == r.container] or [e for e in inv if e.service == r.container]
-            elif reg.container_id:
-                hits = [e for e in inv if e.id.startswith(reg.container_id) or reg.container_id.startswith(e.id)]
             else:
-                hits = []
+                hits = [e for e in inv if any(_same_id(e.id, cid) for cid in reg.container_ids)]
             if not hits:
                 continue
-            # Two compose projects with the same service on one host: the registrant's own, else a running one.
-            mine = [e for e in hits if reg.container_id and e.id.startswith(reg.container_id)]
+            # Two compose projects with the same service on one host: a registrant's own, else a running one.
+            mine = [e for e in hits if any(_same_id(e.id, cid) for cid in reg.container_ids)]
             running = [e for e in hits if e.running]
             found[node] = (mine or running or sorted(hits, key=lambda e: e.name))[0]
         return found
@@ -323,7 +361,8 @@ class Registry:
                     "registered_at": reg.registered_at,
                     "seen_at": reg.seen_at,
                     "lapsed": self.lapsed(reg),
-                    "admin_token": reg.token is not None,
+                    "admin_token": reg.token_for() is not None,
+                    "instances": len(reg.instances),
                     "needs_admin_token": any(r.admin_auth for r in reg.manifest.residents),
                     "placements": [
                         {k: v for k, v in vars(p).items() if k != "tenant" and v is not None}
@@ -391,10 +430,10 @@ class Registry:
             "tenants": {
                 t: {
                     "manifest": reg.manifest.model_dump(mode="json"),
-                    "token": reg.token,
-                    "container_id": reg.container_id,
                     "registered_at": reg.registered_at.isoformat(),
-                    "seen_at": reg.seen_at.isoformat(),
+                    "instances": {
+                        cid: {"token": i.token, "seen_at": i.seen_at.isoformat()} for cid, i in reg.instances.items()
+                    },
                 }
                 for t, reg in self.tenants.items()
             },
@@ -429,12 +468,17 @@ class Registry:
             return
         for t, row in (data.get("tenants") or {}).items():
             try:
+                instances = {
+                    cid: Instance(i.get("token"), datetime.fromisoformat(i["seen_at"]))
+                    for cid, i in (row.get("instances") or {}).items()
+                    if not cid or CONTAINER_ID.fullmatch(cid)
+                }
+                if not instances:
+                    raise ValueError("no instances")
                 self.tenants[t] = Registration(
                     TenantManifest.model_validate(row["manifest"]),
-                    row.get("token"),
-                    row.get("container_id"),
                     datetime.fromisoformat(row["registered_at"]),
-                    datetime.fromisoformat(row["seen_at"]),
+                    instances,
                 )
             except (KeyError, TypeError, ValueError, ValidationError) as exc:
                 log.warning("registration_skipped", tenant=t, error=str(exc)[:300])
@@ -452,6 +496,11 @@ class Registry:
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def _same_id(a: str, b: str) -> bool:
+    """Docker ids, one maybe the 12-character short form."""
+    return bool(a and b) and (a.startswith(b) or b.startswith(a))
 
 
 def _fingerprint(services: list[ServiceConfig]) -> list[str]:
