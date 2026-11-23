@@ -67,6 +67,7 @@ def parse_list(items: list[dict]) -> list[tuple[ContainerEntry, dict[str, str]]]
         names = [n.lstrip("/") for n in data.get("Names") or [] if n]
         labels = data.get("Labels") or {}
         ports: dict[tuple[int, str], int | None] = {}
+        ips: dict[tuple[int, str], list[str]] = {}
         for p in data.get("Ports") or []:
             try:
                 key = (int(p["PrivatePort"]), str(p.get("Type") or "tcp"))
@@ -76,6 +77,8 @@ def parse_list(items: list[dict]) -> list[tuple[ContainerEntry, dict[str, str]]]
             # One entry per port: IPv4 and IPv6 bindings repeat it, and an unpublished port has no PublicPort.
             if ports.get(key) is None:
                 ports[key] = int(public) if public else None
+            if public and p.get("IP") and p["IP"] not in ips.setdefault(key, []):
+                ips[key].append(str(p["IP"]))
         mode = ((data.get("HostConfig") or {}).get("NetworkMode") or "").lower()
         out.append(
             (
@@ -86,7 +89,10 @@ def parse_list(items: list[dict]) -> list[tuple[ContainerEntry, dict[str, str]]]
                     project=labels.get("com.docker.compose.project"),
                     running=data.get("State") == "running",
                     host_network=mode == "host",
-                    ports=[PortMap(private=k[0], public=v, proto=k[1]) for k, v in sorted(ports.items())],
+                    ports=[
+                        PortMap(private=k[0], public=v, proto=k[1], ips=ips.get(k, []))
+                        for k, v in sorted(ports.items())
+                    ],
                 ),
                 dict(labels),
             )

@@ -361,3 +361,18 @@ def test_registration_file_keeps_instances(tmp_path: Path) -> None:
     again.load()
     inst = again.tenants["argus-echo"].instances
     assert {k: v.token for k, v in inst.items()} == {"a" * 64: "t1", "b" * 64: "t2"}
+
+
+def test_a_loopback_only_port_is_not_placed_and_says_why() -> None:
+    reg, _ = registry(services=[])
+    reg.register(ECHO)
+    xtts = entry("argus-echo-xtts", (8141, 8141))
+    xtts.ports[0].ips = ["127.0.0.1"]
+    whisper = entry("argus-echo-whisper", (8144, 8144), (9090, 9090))
+    whisper.ports[0].ips, whisper.ports[1].ips = ["0.0.0.0", "::"], ["127.0.0.1"]
+    reg.observe("dragon", [xtts, whisper])
+    reg.reconcile()
+    reasons = {p.resident: p.reason for p in reg.placements}
+    assert reasons["xtts"] == "argus-echo-xtts publishes 8141 on 127.0.0.1 only: bind it to the LAN or 0.0.0.0"
+    # Several published ports, one of them reachable: that one, no `port` needed.
+    assert [(s.id, s.base_url) for s in reg.services] == [("whisper", "http://192.168.1.198:8144")]

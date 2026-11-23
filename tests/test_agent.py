@@ -225,6 +225,7 @@ async def test_inventory_lists_every_container_with_ports_and_management(host) -
     comfy, echo = inv["voluptas_comfyui"], inv["echo"]
     assert comfy.running and comfy.service == "comfyui" and comfy.project == "voluptas"
     assert [(p.private, p.public) for p in comfy.ports] == [(8188, 8188)]  # IPv4 and IPv6 bindings fold into one
+    assert comfy.ports[0].ips == ["0.0.0.0", "::"]
     assert comfy.managed  # allow-listed
     assert not echo.running and echo.host_network and echo.ports[0].public is None
     assert not echo.managed  # labelled, but this agent has not opted in to the label

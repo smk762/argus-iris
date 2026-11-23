@@ -63,6 +63,9 @@ class PortMap(BaseModel):
     private: int  # the port inside the container
     public: int | None = None  # the host port it is published on; None when it is not published
     proto: str = "tcp"
+    # Host addresses it is published on ("0.0.0.0", "::", "127.0.0.1", a LAN address). Loopback only: no other host,
+    # the broker included, can reach it.
+    ips: list[str] = Field(default_factory=list)
 
 
 class ContainerEntry(BaseModel):

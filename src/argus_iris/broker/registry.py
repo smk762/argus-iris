@@ -37,7 +37,7 @@ from argus_cortex.gpu_wire import IN_PROCESS, TenantManifest, TenantResident, ta
 from pydantic import ValidationError
 
 from argus_iris.broker.config import BrokerConfig, NodeConfig, RegisteredService, ServiceConfig
-from argus_iris.models import ContainerEntry, utcnow
+from argus_iris.models import ContainerEntry, PortMap, utcnow
 
 log = structlog.get_logger("argus_iris.registry")
 
@@ -541,8 +541,21 @@ def _scheme_path(url: str | None) -> tuple[str, str]:
     return parts.scheme or "http", parts.path.rstrip("/")
 
 
+def _loopback_only(p: PortMap) -> bool:
+    return bool(p.ips) and all(ip.startswith("127.") or ip == "::1" for ip in p.ips)
+
+
 def _port(r: TenantResident, entry: ContainerEntry | None) -> tuple[int | None, str | None]:
     """The host port that reaches resident *r* in *entry*, or None and why not."""
+    port, why = _pick_port(r, entry)
+    if port is not None and entry is not None and not entry.host_network:
+        hit = next(p for p in entry.ports if p.public == port and p.proto == "tcp")
+        if _loopback_only(hit):
+            return None, f"{entry.name} publishes {port} on {', '.join(hit.ips)} only: bind it to the LAN or 0.0.0.0"
+    return port, why
+
+
+def _pick_port(r: TenantResident, entry: ContainerEntry | None) -> tuple[int | None, str | None]:
     want = getattr(r, "port", None) or _url_port(r.base_url)
     if entry is None or entry.host_network:
         return (want, None) if want else (None, "no port: set port in the manifest")
@@ -555,6 +568,8 @@ def _port(r: TenantResident, entry: ContainerEntry | None) -> tuple[int | None, 
             return None, f"{entry.name} does not publish port {want}"
         return hit.public, None
     published = [p for p in tcp if p.public is not None]
+    if len(published) > 1 and len(reachable := [p for p in published if not _loopback_only(p)]) == 1:
+        return reachable[0].public, None  # one port for the LAN, the rest loopback-only (a debug or metrics port)
     if len(published) == 1:
         return published[0].public, None
     if not published:
