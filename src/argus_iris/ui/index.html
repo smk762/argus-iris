@@ -36,6 +36,7 @@
     <div class="tablist" role="tablist" aria-label="Dashboard views">
       <button type="button" role="tab" id="tab-gpus" aria-selected="true">GPUs <span class="count" id="count-gpus"></span></button>
       <button type="button" role="tab" id="tab-services" aria-selected="false" tabindex="-1">Services <span class="count" id="count-services"></span></button>
+      <button type="button" role="tab" id="tab-suite" aria-selected="false" tabindex="-1">Suite <span class="count" id="count-suite"></span></button>
       <button type="button" role="tab" id="tab-connect" aria-selected="false" tabindex="-1">Connect</button>
     </div>
 
@@ -74,6 +75,22 @@
             <thead><tr><th scope="col">Node</th><th scope="col">Origin</th><th scope="col">Agent</th>
               <th scope="col" class="num">Containers</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
             <tbody><tr><td colspan="5" class="none">loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section role="tabpanel" id="panel-suite" aria-labelledby="tab-suite" hidden>
+      <div class="stack">
+        <p class="lede">Every container labelled <code>argus.peer</code> on any node, and the peers the broker config names.
+          Reached at the node agent's address and the published port; health from each one's <code>/health</code>, read every
+          30 s. Label a service in its own compose file (<code>labels: {argus.peer: lens}</code>) to list it here.</p>
+        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="cap-suite">
+          <table class="suite">
+            <caption id="cap-suite">Suite services</caption>
+            <thead><tr><th scope="col">Peer</th><th scope="col">Service · version</th><th scope="col">Node</th>
+              <th scope="col">Reached at</th><th scope="col">Health</th><th scope="col">Checked</th></tr></thead>
+            <tbody><tr><td colspan="6" class="none">loading…</td></tr></tbody>
           </table>
         </div>
       </div>

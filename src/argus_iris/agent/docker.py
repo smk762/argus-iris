@@ -88,6 +88,7 @@ def parse_list(items: list[dict]) -> list[tuple[ContainerEntry, dict[str, str]]]
                     service=labels.get("com.docker.compose.service"),
                     project=labels.get("com.docker.compose.project"),
                     running=data.get("State") == "running",
+                    labels={k: str(v)[:200] for k, v in labels.items() if k.startswith("argus.")},
                     host_network=mode == "host",
                     ports=[
                         PortMap(private=k[0], public=v, proto=k[1], ips=ips.get(k, []))

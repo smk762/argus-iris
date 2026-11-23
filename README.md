@@ -67,6 +67,24 @@ every minute (`POST /nodes`, authenticated with the agent token) and becomes a n
 (`IRIS_AGENT_URL` overrides that). Configured nodes win on name; `DELETE /nodes/{name}` forgets an announced one.
 `register_services: false` or `register_nodes: false` in `iris.yaml` turns either off.
 
+### Service directory
+
+Any container whose compose file labels it `argus.peer: <name>` (the name callers ask for: `nudenet`, `singguard`,
+`lens`) is listed in iris's service directory, GPU or not. iris finds it in the node agents' inventories and reaches it
+at the agent's host and the published port. The rules match registered residents: the optional `argus.port` label picks
+one when a container publishes several, and a loopback-only bind is reported and not served. Health comes from
+`argus.health` (default `/health`) every 30 s, read in full when it is argus-cortex's `ServiceHealth` and as up or down
+otherwise. `peers:` in `iris.yaml` adds URLs for peers outside the agents' view; configured peers come first.
+
+- `GET /directory`: every entry, with its URL (or why it has none) and health.
+- `GET /directory/{peer}`: where to reach a peer, best first (healthiest, then node order). Callers use it to find a
+  peer (argus-cortex#207). It decides where work is sent, so it needs `ARGUS_GPU_BROKER_TOKEN` set on the broker and
+  presented by the caller.
+- `GET /directory/sd`: Prometheus HTTP service discovery (`http_sd_configs`), one target per reachable service, labelled
+  `argus_peer`, `argus_service`, `node`, `container` and `argus_health_path`.
+
+The dashboard's **Suite** view (`/ui/#suite`) lists them, with any failing checks at the top.
+
 ### Leases
 
 Callers take leases with the broker coordinator (above). A service target goes to the configured services that serve it, in config order (`ollama-dragon` before

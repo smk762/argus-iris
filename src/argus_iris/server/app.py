@@ -41,7 +41,7 @@ from argus_iris.broker.leases import LeaseConflict, LeaseRecord
 from argus_iris.broker.policy import Policy, load_policy
 from argus_iris.broker.registry import RegistrationError
 from argus_iris.broker.state import Broker
-from argus_iris.models import NodeState, Resident
+from argus_iris.models import DirectoryEntry, NodeState, PeerLookup, Resident
 
 log = structlog.get_logger("argus_iris.server")
 
@@ -353,6 +353,31 @@ def create_app(
     async def services() -> list[dict]:
         """Every service iris reads: from the config file (``origin: config``) or a tenant's manifest (``tenant``)."""
         return broker.registry.describe_services()
+
+    # --- service directory (#48): containers labelled argus.peer, read-only ------------------------------------
+
+    @app.get("/directory", response_model=list[DirectoryEntry])
+    async def directory() -> list[DirectoryEntry]:
+        """Every labelled service on every node (and the config's peers): where it is reached and what its health
+        says. Read-only, like /services."""
+        return broker.directory.entries
+
+    @app.get("/directory/sd")
+    async def directory_sd() -> list[dict]:
+        """Prometheus ``http_sd_configs`` target groups, one per reachable service (labels argus_peer, argus_service,
+        node, container, argus_health_path)."""
+        return broker.directory.service_discovery()
+
+    @app.get("/directory/{peer}", response_model=PeerLookup)
+    async def lookup_peer(peer: str, authorization: str | None = Header(default=None)) -> PeerLookup:
+        """Where to reach *peer*, best first (argus-cortex#207). This decides where a caller sends its work (a
+        moderation check, say), so it answers only when the broker has a caller token, and only to a caller that
+        presents it: with no token, POST /tenants is open to the LAN."""
+        check_caller(authorization, required=True)
+        found = broker.directory.lookup(peer)
+        if not found.urls:
+            raise HTTPException(404, f"no reachable peer {peer!r}")
+        return found
 
     @app.post("/nodes")
     async def announce_node(
