@@ -39,8 +39,37 @@ The broker, on morpheus (see [deploy/iris.example.yaml](deploy/iris.example.yaml
 argus-iris serve --config iris.yaml   # :8120 — /nodes, /residents, /leases, /tenants, /events, /metrics, /health
 ```
 
-Callers take leases with `ARGUS_GPU_COORDINATOR=broker` and `ARGUS_GPU_BROKER_URL=http://<broker>:8120` (argus-cortex
-0.7+). A service target goes to the configured services that serve it, in config order (`ollama-dragon` before
+### Adding a service or a GPU host
+
+A service needs two settings: `ARGUS_GPU_BROKER_URL=http://<broker>:8120` and `ARGUS_GPU_BROKER_TOKEN`. With
+argus-cortex 0.15 the client takes the broker coordinator from the URL alone, finds `gpu-tenant.yaml`, registers it at
+startup (`POST /tenants`) and renews it every five minutes. Older clients register with their first lease and also need
+`ARGUS_GPU_COORDINATOR=broker`. Each manifest resident becomes a service once some node's agent reports its container
+(by name, else compose service): the node is that agent's, and `base_url` is that agent's host plus the container's
+published port (the resident's `port` picks one when it publishes several). The caller's own host is never used. A
+resident with `admin_auth` is called with the admin token the client sent (`X-Argus-Admin-Token`, from its
+`ARGUS_ADMIN_TOKEN`), and only that: an operator's `token_env` never goes to a registered host. `iris.yaml` entries win:
+a resident whose container a configured service already reads is left to it. `GET /services` lists every service with
+its origin, and `GET /registry` shows each tenant's residents and where they landed or why not (the dashboard's
+Services view).
+
+Removal needs nothing either. A client signs off on shutdown (`DELETE /tenants/{tenant}`), which only lapses the
+registration: its services stay while their containers exist, because iris may be the one that stopped them, and go
+once an agent reports the container removed. `?purge=true` (the dashboard's Forget) drops it at once. Registrations,
+with their tokens, persist in `$IRIS_STATE_DIR/registrations.json` (mode 0600; the compose file mounts a volume).
+
+For iris to start or restart a registered container, the host's agent must allow it: on `IRIS_AGENT_CONTAINERS`, or,
+where the agent sets `IRIS_AGENT_MANAGE_LABEL=1`, labelled `argus.iris.manage: "true"` in the service's own compose file.
+Neither the broker nor a manifest can widen that.
+
+A new GPU host runs `iris-agent` with `IRIS_AGENT_NODE`, `IRIS_AGENT_TOKEN` and `IRIS_BROKER_URL`. It announces itself
+every minute (`POST /nodes`, authenticated with the agent token) and becomes a node at the address it called from
+(`IRIS_AGENT_URL` overrides that). Configured nodes win on name; `DELETE /nodes/{name}` forgets an announced one.
+`register_services: false` or `register_nodes: false` in `iris.yaml` turns either off.
+
+### Leases
+
+Callers take leases with the broker coordinator (above). A service target goes to the configured services that serve it, in config order (`ollama-dragon` before
 `ollama-jarrah`), preferring a node where the model is already loaded and skipping services that are down; the grant
 carries that node and its `base_url`. A service also answers the names in its `serves` list (morpheus's argus-echo
 XTTS has `serves: [xtts]`, so an `xtts` lease that does not fit on dragon goes there). When `ARGUS_GPU_BROKER_TOKEN` is set on the broker, the lease routes require it
@@ -67,13 +96,17 @@ curl -X POST -H "Authorization: Bearer $ARGUS_GPU_BROKER_TOKEN" \
   "http://morpheus:8120/residents/dragon/xtts/evict?mode=auto"   # mode: auto | evict | unload
 ```
 
-The broker also serves a dashboard at `http://<broker>:8120/ui/` (`/` redirects there): VRAM per node split into
+The broker also serves a dashboard at `http://<broker>:8120/ui/` (`/` redirects there). **GPUs** has a card per node
+and then each node in full: VRAM split into
 residents, unattributed, held-back and admissible memory, plus residents with idle times, services with a warm button, residents with an evict button,
 and the node's leases (marked "over" where admission would have refused them). A service is flagged when what the node
 can never free (pins, unmanaged processes, unloaded residues) leaves less room than it needs; `/health` lists those
 under `crowded_out`.
-It updates live from `/events`. To warm from the page, enter `ARGUS_GPU_BROKER_TOKEN` under "Broker token". It is kept
-in that tab's session storage only.
+It updates live from `/events`. **Services** (`/ui/#services`) lists every service with where it came from, how iris
+reaches it and whether its agent will start it, each registered tenant with where its residents landed (or why not),
+and every node, with Forget for registrations and announced nodes. **Connect** (`/ui/#connect`) has the settings to copy
+for a new service or GPU host. To warm, evict or forget from the page, enter `ARGUS_GPU_BROKER_TOKEN` under "Broker
+token". It is kept in that tab's session storage only.
 
 Part of the [Argus suite](https://github.com/smk762?tab=repositories&q=argus).
 

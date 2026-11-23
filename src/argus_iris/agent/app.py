@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import httpx
 import structlog
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import Response
@@ -20,10 +21,18 @@ from prometheus_client.core import GaugeMetricFamily
 
 import argus_iris
 from argus_iris.agent import procfs
-from argus_iris.agent.docker import DEFAULT_SOCKET, ContainerInfo, DockerClient, DockerError
+from argus_iris.agent.docker import DEFAULT_SOCKET, MANAGE_LABEL, ContainerInfo, DockerClient, DockerError, label_true
 from argus_iris.agent.nvml import NvmlSampler, Sample
 from argus_iris.agent.tracker import ProcessTracker
-from argus_iris.models import ActionResult, ContainerAction, ContainerMemory, GpuProcess, NodeSnapshot, utcnow
+from argus_iris.models import (
+    ActionResult,
+    ContainerAction,
+    ContainerEntry,
+    ContainerMemory,
+    GpuProcess,
+    NodeSnapshot,
+    utcnow,
+)
 
 log = structlog.get_logger("argus_iris.agent")
 
@@ -42,6 +51,21 @@ class AgentSettings:
     proc_root: Path = Path("/proc")
     cgroup_root: Path = Path("/sys/fs/cgroup")
     idle_util_pct: int = 5
+    # Also let the broker act on containers that carry this label set to true (argus.iris.manage=true), as set in the
+    # service's own compose file on this host. Off unless IRIS_AGENT_MANAGE_LABEL is set: the label is the host's
+    # decision, never the broker's or a manifest's.
+    manage_label: str | None = None
+    # Announce this node to the broker (POST /nodes, authenticated with the agent token), so a new GPU host needs no
+    # broker config: IRIS_BROKER_URL, plus IRIS_AGENT_URL when the broker cannot reach the agent at the address it
+    # sees the announcement come from.
+    broker_url: str | None = None
+    advertise_url: str | None = None
+    port: int = 9110
+    gpu: int = 0
+    announce_s: float = 60.0
+
+    def manages(self, name: str, labels: dict[str, str]) -> bool:
+        return name in self.containers or (self.manage_label is not None and label_true(labels, self.manage_label))
 
     @classmethod
     def from_env(cls) -> AgentSettings:
@@ -55,7 +79,20 @@ class AgentSettings:
             proc_root=Path(env("IRIS_AGENT_PROC", "/proc")),
             cgroup_root=Path(env("IRIS_AGENT_CGROUP_ROOT", "/sys/fs/cgroup")),
             idle_util_pct=int(env("IRIS_AGENT_IDLE_UTIL_PCT", "5")),
+            manage_label=_label_setting(env("IRIS_AGENT_MANAGE_LABEL", "")),
+            broker_url=(env("IRIS_BROKER_URL") or "").rstrip("/") or None,
+            advertise_url=(env("IRIS_AGENT_URL") or "").rstrip("/") or None,
+            port=int(env("IRIS_AGENT_PORT", "9110")),
+            gpu=int(env("IRIS_AGENT_GPU", "0")),
         )
+
+
+def _label_setting(raw: str) -> str | None:
+    """IRIS_AGENT_MANAGE_LABEL: unset/0/false -> off; 1/true -> argus.iris.manage; anything else is the label key."""
+    raw = raw.strip()
+    if raw.lower() in ("", "0", "false", "no", "off"):
+        return None
+    return MANAGE_LABEL if raw.lower() in ("1", "true", "yes", "on") else raw
 
 
 class Agent:
@@ -157,6 +194,15 @@ class Agent:
                 if path:
                     cgroups[name] = path
 
+        inventory: list[ContainerEntry] | None = None
+        try:
+            inventory = [
+                entry.model_copy(update={"managed": self.settings.manages(entry.name, labels)})
+                for entry, labels in await self.docker.list()
+            ]
+        except DockerError as exc:
+            self._poll_docker_error = str(exc)
+
         containers = []
         for name, path in sorted(cgroups.items()):
             anon = procfs.read_anon_mb(self.settings.cgroup_root, path)
@@ -172,10 +218,39 @@ class Agent:
             host=procfs.read_host_memory(self.settings.proc_root / "meminfo"),
             containers=containers,
             nvml_error=sample.error,
+            inventory=inventory,
         )
         self.last_poll_monotonic = now
         self.docker_error = self._poll_docker_error  # a Docker failure is reported only while it lasts
         return self.snapshot
+
+    async def allowed(self, name: str) -> bool:
+        """The broker may act on *name*: allow-listed, or labelled for it where the agent opted in to the label."""
+        if name in self.settings.containers:
+            return True
+        if self.settings.manage_label is None:
+            return False
+        try:
+            info = await self.docker.inspect(name)  # the label as it is now, not as the last poll saw it
+        except DockerError:
+            return False
+        return info is not None and self.settings.manages(info.name, info.labels)
+
+    async def announce(self, client: httpx.AsyncClient) -> bool:
+        """Tell the broker this node exists (POST /nodes). False when the broker refused or could not be reached."""
+        s = self.settings
+        body = {"name": s.node, "agent_url": s.advertise_url, "port": s.port, "gpu": s.gpu}
+        try:
+            resp = await client.post(
+                f"{s.broker_url}/nodes", json=body, headers={"Authorization": f"Bearer {s.token}"}, timeout=10.0
+            )
+        except httpx.HTTPError as exc:
+            log.warning("announce_failed", broker=s.broker_url, error=str(exc))
+            return False
+        if resp.status_code >= 400:
+            log.warning("announce_refused", broker=s.broker_url, status=resp.status_code, detail=resp.text[:200])
+            return False
+        return True
 
     async def act(self, name: str, action: ContainerAction) -> ActionResult:
         try:
@@ -242,23 +317,34 @@ def create_app(settings: AgentSettings | None = None, *, agent: Agent | None = N
                 log.exception("agent_poll_failed")
             await asyncio.sleep(settings.poll_s)
 
+    async def _announcer() -> None:
+        async with httpx.AsyncClient() as client:
+            while True:
+                await agent.announce(client)
+                await asyncio.sleep(settings.announce_s)
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         task = asyncio.create_task(_poller(), name="iris-agent-poll") if poll else None
+        announcing = bool(poll and settings.broker_url and settings.token)
+        announcer = asyncio.create_task(_announcer(), name="iris-agent-announce") if announcing else None
         log.info(
             "agent_started",
             node=settings.node,
             poll_s=settings.poll_s,
             actions="enabled" if settings.token else "disabled (no IRIS_AGENT_TOKEN)",
             containers=sorted(settings.containers),
+            manage_label=settings.manage_label,
+            broker=settings.broker_url if announcing else None,
         )
         try:
             yield
         finally:
-            if task:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+            for t in (task, announcer):
+                if t:
+                    t.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await t
             await agent.aclose()
 
     app = FastAPI(title="iris-agent", version=argus_iris.__version__, lifespan=lifespan)
@@ -297,7 +383,7 @@ def create_app(settings: AgentSettings | None = None, *, agent: Agent | None = N
         scheme, _, presented = (authorization or "").partition(" ")
         if scheme.lower() != "bearer" or not hmac.compare_digest(presented.encode(), settings.token.encode()):
             raise HTTPException(401, "bad or missing bearer token", headers={"WWW-Authenticate": "Bearer"})
-        if name not in settings.containers:
+        if not await agent.allowed(name):
             raise HTTPException(403, f"container {name!r} is not on this agent's allowlist")
         result = await agent.act(name, action)
         if not result.ok:

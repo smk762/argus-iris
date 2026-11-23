@@ -26,6 +26,12 @@ services:
       IRIS_AGENT_TOKEN: ${IRIS_AGENT_TOKEN:-}
       # The only containers the broker may start/stop/restart on this host, e.g. voluptas_comfyui on morpheus.
       IRIS_AGENT_CONTAINERS: ${IRIS_AGENT_CONTAINERS:-}
+      # Also containers labelled argus.iris.manage=true (in their own compose file on this host). Off unless set to 1.
+      IRIS_AGENT_MANAGE_LABEL: ${IRIS_AGENT_MANAGE_LABEL:-}
+      # Announce this node to the broker, so a new GPU host needs no broker config. Needs IRIS_AGENT_TOKEN (the
+      # broker checks it). IRIS_AGENT_URL only when the broker cannot reach this agent at the address it calls from.
+      IRIS_BROKER_URL: ${IRIS_BROKER_URL:-}
+      IRIS_AGENT_URL: ${IRIS_AGENT_URL:-}
 
 networks:
   iris-agent: {}

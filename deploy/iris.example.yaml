@@ -109,5 +109,12 @@ lease_stall_s: 1800              # granted, heartbeating, no GPU activity this l
 lease_stall_reclaim: false       # true: also end a stalled lease that blocks the queue, after lease_stall_s / 2 more
 pinned: []                    # resident ids (fnmatch) admission never evicts, e.g. "jarrah/ollama-jarrah/qwen3:8b"
 
+# Self-registration. A tenant's gpu-tenant.yaml residents become services once an agent reports their containers (node
+# and published port from the agent's inventory), and agents with IRIS_BROKER_URL announce their nodes. The entries
+# above win. Registrations persist in $IRIS_STATE_DIR (the broker compose file mounts a volume there).
+register_services: true
+register_nodes: true
+registration_ttl_s: 900          # not renewed this long: lapsed (kept while the container exists)
+
 # Browser origins (the Studio page) allowed to make state-changing requests.
 trusted_origins: []

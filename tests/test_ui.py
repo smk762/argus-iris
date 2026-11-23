@@ -22,7 +22,17 @@ def test_dashboard_is_served() -> None:
         page = client.get("/ui/")
         assert page.status_code == 200 and "text/html" in page.headers["content-type"]
         # Everything the page references is packaged.
-        for asset in ("app.js", "app.css", "vendor/dh/dh-tokens.css", "vendor/dh/dh-theme.js"):
+        for asset in (
+            "app.js",
+            "app.css",
+            "vendor/dh/dh-tokens.css",
+            "vendor/dh/dh-theme.js",
+            "brand/icon.svg",
+            "brand/favicon.ico",
+            "brand/apple-icon.png",
+            "brand/argus-iris-lockup-light.svg",
+            "brand/argus-iris-lockup-dark.svg",
+        ):
             assert f'"{asset}"' in page.text
             assert client.get(f"/ui/{asset}").status_code == 200, asset
         # The API routes are not shadowed by the mount.

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 DEFAULT_HEADROOM_MB = 512
 
@@ -88,6 +88,29 @@ class ServiceConfig(BaseModel):
         return v.rstrip("/")
 
 
+class RegisteredService(ServiceConfig):
+    """A service iris learned from a registered tenant manifest's resident, not from this file.
+
+    Its node and ``base_url`` are resolved from the node agents' container inventories, never taken from the caller:
+    the host is always the node's own agent host. It authenticates with the admin token its tenant sent when it
+    registered (``X-Argus-Admin-Token``), and only that: an operator's ``token_env`` is never sent to a host that
+    registered itself.
+    """
+
+    origin: Literal["tenant"] = "tenant"
+    tenant: str
+    resident: str  # the manifest resident's name
+    managed: bool | None = None  # the node's agent would start or restart its container; None: agent does not say
+    _token: str | None = PrivateAttr(default=None)
+
+    def headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._token}"} if self._token else {}
+
+    def with_token(self, token: str | None) -> RegisteredService:
+        self._token = token
+        return self
+
+
 class TenantConfig(BaseModel):
     """A tenant's own processes on the GPU nodes (#36): what links a ``process`` resident to the tenant leasing for it."""
 
@@ -140,6 +163,17 @@ class BrokerConfig(BaseModel):
     tenants: dict[str, TenantConfig] = Field(default_factory=dict)
     # How often the residency policy (IRIS_POLICY: idle-kill, keepalive, restart) is acted on.
     residency_s: float = Field(15.0, gt=0)
+    # Self-registration. A tenant's manifest residents become services once a node agent reports their container
+    # (node and published port found from its inventory), and agents that announce themselves (POST /nodes, with the
+    # agent token) become nodes. Entries in this file win over both.
+    register_services: bool = True
+    register_nodes: bool = True
+    # A registration not renewed this long is "lapsed": its services stay while their containers exist (a stopped
+    # container can still be warmed) and go once the container is removed. cortex's client renews every 300 s.
+    registration_ttl_s: float = Field(900.0, gt=0)
+    # Where registrations (manifests, the admin tokens they came with, announced nodes) are kept across restarts.
+    # IRIS_STATE_DIR overrides it; unset, they live in memory and clients re-register within registration_ttl_s.
+    state_dir: str | None = None
 
     @model_validator(mode="after")
     def _check(self) -> BrokerConfig:

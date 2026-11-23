@@ -32,12 +32,14 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
+from pydantic import BaseModel, Field
 
 import argus_iris
 from argus_iris.broker.actions import ActionError, EvictMode, EvictResult, WarmResult, evict_resident, warm_service
 from argus_iris.broker.config import BrokerConfig, load_config
 from argus_iris.broker.leases import LeaseConflict, LeaseRecord
 from argus_iris.broker.policy import Policy, load_policy
+from argus_iris.broker.registry import RegistrationError
 from argus_iris.broker.state import Broker
 from argus_iris.models import NodeState, Resident
 
@@ -46,6 +48,15 @@ log = structlog.get_logger("argus_iris.server")
 SSE_KEEPALIVE_S = 15.0
 MAX_WAIT_S = 60.0  # longest a GET /leases/{id} is held; the client asks for 20 s
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
+
+
+class NodeAnnouncement(BaseModel):
+    """An agent's ``POST /nodes``: its node name, and where the broker reaches it (else the address it called from)."""
+
+    name: str = Field(max_length=63)
+    agent_url: str | None = Field(None, max_length=300)
+    port: int = Field(9110, ge=1, le=65535)
+    gpu: int = Field(0, ge=0, le=63)
 
 
 class _BrokerCollector:
@@ -206,6 +217,11 @@ def create_app(
             "agents": agents,
             "pins_missing": broker.residency.missing_pins(),
             "crowded_out": broker.crowded(),
+            "registered": {
+                "tenants": len(broker.registry.tenants),
+                "services": len(broker.registry.services),
+                "nodes": len(broker.registry.announced),
+            },
         }
 
     @app.get("/nodes", response_model=list[NodeState])
@@ -287,10 +303,93 @@ def create_app(
         return rec.status(leases.position(rec))
 
     @app.post("/tenants")
-    async def register_tenant(manifest: TenantManifest, authorization: str | None = Header(default=None)) -> dict:
+    async def register_tenant(
+        manifest: TenantManifest,
+        authorization: str | None = Header(default=None),
+        x_argus_admin_token: str | None = Header(default=None),
+        x_argus_container_id: str | None = Header(default=None),
+    ) -> dict:
+        """Register (or renew) a tenant's manifest. Its residents become services once an agent reports their
+        containers; ``X-Argus-Admin-Token`` is what iris sends to those services' admin routes (``admin_auth``)."""
         check_caller(authorization, required=False)
         changed = leases.register(manifest)
-        return {"tenant": manifest.tenant, "kinds": [k.kind for k in manifest.kinds], "changed": changed}
+        registered = broker.registry.register(manifest, token=x_argus_admin_token, container_id=x_argus_container_id)
+        if registered:
+            broker.reconcile()
+        placed = [p for p in broker.registry.describe_tenants() if p["tenant"] == manifest.tenant]
+        return {
+            "tenant": manifest.tenant,
+            "kinds": [k.kind for k in manifest.kinds],
+            "changed": changed or registered,
+            "placements": placed[0]["placements"] if placed else [],
+        }
+
+    @app.delete("/tenants/{tenant}")
+    async def forget_tenant(
+        tenant: str,
+        purge: bool = False,
+        authorization: str | None = Header(default=None),
+        x_argus_container_id: str | None = Header(default=None),
+    ) -> dict:
+        """A tenant signs off (cortex's client, on shutdown): its registration lapses now, and its services stay while
+        their containers exist, since iris may be the one that stopped them. ``purge=true`` (the dashboard's Forget)
+        drops the registration, its services and its manifest at once; a client still running registers again on
+        its next renewal."""
+        check_caller(authorization, required=False)
+        known = broker.registry.forget(tenant, purge=purge, container_id=x_argus_container_id)
+        if purge:
+            known = leases.tenants.pop(tenant, None) is not None or known
+        if not known:
+            raise HTTPException(404, f"no tenant {tenant!r}")
+        broker.reconcile()
+        return {"tenant": tenant, "forgotten": purge, "lapsed": not purge}
+
+    @app.get("/registry")
+    async def show_registry() -> dict:
+        """Registered tenants (where each resident landed, or why not) and every node with where it came from."""
+        return {"tenants": broker.registry.describe_tenants(), "nodes": broker.registry.describe_nodes()}
+
+    @app.get("/services")
+    async def services() -> list[dict]:
+        """Every service iris reads: from the config file (``origin: config``) or a tenant's manifest (``tenant``)."""
+        return broker.registry.describe_services()
+
+    @app.post("/nodes")
+    async def announce_node(
+        body: NodeAnnouncement, request: Request, authorization: str | None = Header(default=None)
+    ) -> dict:
+        """An agent announces its node. Authenticated with the agent token, so only an agent that already holds the
+        secret the broker sends to agents can add one."""
+        token = os.environ.get(config.agent_token_env, "")
+        if not token:
+            raise HTTPException(403, f"node announcements are disabled: {config.agent_token_env} is not set")
+        scheme, _, presented = (authorization or "").partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(presented.encode(), token.encode()):
+            raise HTTPException(401, "bad or missing agent token", headers={"WWW-Authenticate": "Bearer"})
+        url = body.agent_url
+        if not url:
+            host = request.client.host if request.client else None
+            if not host:
+                raise HTTPException(422, "no agent_url, and the caller's address is unknown")
+            url = f"http://[{host}]:{body.port}" if ":" in host else f"http://{host}:{body.port}"
+        try:
+            status = broker.registry.announce(body.name, url, body.gpu)
+        except RegistrationError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if status in ("added", "changed"):
+            broker.reconcile()
+        return {"node": body.name, "status": status, "agent_url": config.nodes[body.name].agent_url}
+
+    @app.delete("/nodes/{name}")
+    async def forget_node(name: str, authorization: str | None = Header(default=None)) -> dict:
+        """Forget an announced node (a host taken out of service). Configured nodes stay: edit the config file."""
+        check_caller(authorization, required=True)
+        if name in broker.registry.configured_nodes:
+            raise HTTPException(409, f"node {name!r} is in the config file")
+        if not broker.registry.forget_node(name):
+            raise HTTPException(404, f"no announced node {name!r}")
+        broker.reconcile()
+        return {"node": name, "forgotten": True}
 
     @app.get("/tenants", response_model=list[TenantManifest])
     async def tenants() -> list[TenantManifest]:
@@ -350,7 +449,11 @@ def create_app(
 
     @app.get("/config")
     async def show_config() -> dict:
-        return json.loads(config.model_dump_json())
+        """The config file as loaded: registered services and announced nodes are on /services and /registry."""
+        shown = config.model_copy(
+            update={"services": broker.registry.configured, "nodes": broker.registry.configured_nodes}
+        )
+        return json.loads(shown.model_dump_json())
 
     # The dashboard: static files shipped in the package, a thin client over the routes above. Same origin, so its
     # warm POST passes the WriteGuard without a trusted_origins entry; the bearer token is still required.

@@ -31,7 +31,9 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
 - `agent/` — `iris-agent` (`[agent]` extra, `argus-iris agent`, :9110). `nvml.py` samples, `tracker.py` keeps idle
   time (VRAM unchanged **and** no utilisation), `procfs.py` maps PIDs to containers through cgroups and reads anon
   memory, `docker.py` is a minimal Engine API client over the Unix socket, `app.py` serves `/snapshot`, `/metrics`,
-  `/health` and token- and allowlist-gated `POST /containers/{name}/{start|stop|restart}`.
+  `/health` and token- and allowlist-gated `POST /containers/{name}/{start|stop|restart}`. The snapshot's `inventory`
+  lists every container (ports, compose labels, `managed`). `IRIS_AGENT_MANAGE_LABEL` opts the agent in to also allowing
+  containers labelled `argus.iris.manage=true`; `IRIS_BROKER_URL` makes it announce its node.
 - `broker/` — `config.py` (YAML, `IRIS_CONFIG`), `adapters/` (comfyui, ollama, argus-http, external; read-only; external is up/down from `health_path` only, freed by a container stop only with `evict_by: stop`, which admission uses only under an enforced policy rule and `Broker.stopped` re-warms),
   argus-http validates `/health` as cortex's `ResidentHealth` and reads older shapes best-effort, logging
   `resident_off_contract` (and `detail.off_contract` on the resident); a truthy non-bool `busy` counts as busy,
@@ -53,15 +55,24 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
   eviction left so it is not repeated), `actions.py` (warm: 409 unless `force` while the node cannot admit `warm_mb` or the most it was seen holding, `Broker.peaks`; agent starts the container, wait for health, call `warm_path`;
   `evict_resident`: adapter route per source, 409 while busy, confirmed by the GPU's NVML free memory rising by half
   the resident's VRAM, not by the service's word; reports `residual_mb`).
+- `broker/registry.py` — self-registration (`Registry`): manifest residents -> `RegisteredService` (config.py) placed from
+  the agents' container `inventory` (node = the agent's, host = its `agent_url` host, port = the published one; the
+  caller's host is never used), kept in `config.services` after the configured ones (in place: the lease book and
+  residency share that list; `Broker.reconcile` rebuilds adapters). A registered service sends only its tenant's
+  `X-Argus-Admin-Token`, never a `token_env`. `DELETE /tenants` lapses (cortex signs off on every shutdown), `?purge=true`
+  drops; lapsed services live while their container exists. Agents announce nodes (`POST /nodes`, agent token).
+  Persisted to `$IRIS_STATE_DIR/registrations.json` (0600).
 - `server/app.py` — the broker API (`[server]` extra, `argus-iris serve`, :8120): `/nodes`, `/residents`, `/events`
-  (SSE: `node` and `lease` events), `/metrics`, `/health`, `/ui/`, the lease routes (`POST /tenants`, `POST /leases`,
+  (SSE: `node` and `lease` events), `/metrics`, `/health`, `/ui/`, `/services`, `/registry`, `POST`/`DELETE /nodes`, `DELETE /tenants/{t}`, the lease routes (`POST /tenants`, `POST /leases`,
   `GET /leases/{id}?wait_s=`, `.../heartbeat`, `.../release`, `GET /leases`, `/queue`, `/tenants`; bearer token
   checked only when `ARGUS_GPU_BROKER_TOKEN` is set) `POST /services/{id}/warm` and `POST /residents/{id}/evict` (resident ids contain slashes; both need that token). Wrapped in
   cortex's `WriteGuard`. Test the lease routes with cortex's own `BrokerCoordinator` over `httpx.ASGITransport`.
 - `ui/` — the dashboard, served by the broker at `/ui/` (`/` redirects). Plain HTML and ES modules with no build
   step, shipped in the wheel (the pattern argus-mask and argus-survey use). It is a thin client over `/health`,
-  `/config` and `/events`, and the warm POST, so it never computes what the broker decides. `vendor/dh/` holds
-  `dh-tokens.css` and `dh-theme.js`, copied unchanged from dh-shared 1.2.7 (via argus-mask): **never edit them**.
+  `/config`, `/events`, `/services` and `/registry`, and the warm/evict/forget calls, so it never computes what the broker
+  decides. Views: GPUs, Services, Connect (`#services`, `#connect` link to them). `brand/` holds the iris mark from
+  argus-cortex `brand/packages/iris` (never edit; re-copy). `vendor/dh/` holds
+  `dh-tokens.css` and `dh-theme.js`, copied unchanged from dh-shared 1.2.8 (via argus-sightline): **never edit them**.
   Re-copy them from a newer sync instead. Colours come from `--dh-*` tokens only.
 - `cli.py` — Typer app; entry point `argus-iris` (`serve`, `agent`, `version`).
 - `compose.yaml` includes `deploy/broker.compose.yaml` and `deploy/agent.compose.yaml` with `deploy/.env` (project
@@ -86,7 +97,8 @@ Run one test: `uv run --no-sync pytest tests/test_x.py::test_name -q`.
 - Wire schemas (if any) are checked in and verified in CI — regenerate and commit when the types change, don't let the committed copy drift.
 - **Ports:** a2f holds :8110 on morpheus, so the broker is :8120; the agent is :9110 (gothmog's exporter used :9101).
 - **The agent is root-equivalent** (Docker socket, `pid: host`). Container actions stay behind `IRIS_AGENT_TOKEN`
-  **and** the agent's own `IRIS_AGENT_CONTAINERS` allowlist; never let broker config or a POSTed manifest widen it.
+  **and** the agent's own `IRIS_AGENT_CONTAINERS` allowlist (or, opted in per host, the `argus.iris.manage` label set
+  in that host's compose files); never let broker config or a POSTed manifest widen it.
 - **Memory is MiB** everywhere (`*_mb`), times are aware UTC.
 - **Don't 4xx for "busy"** on lease routes: cortex's client treats any 4xx other than 404 as a caller error. Busy is
   `queued`.

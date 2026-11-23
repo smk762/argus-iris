@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fnmatch
+import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
 import structlog
@@ -19,6 +21,7 @@ from argus_iris.broker.adapters import ServiceReading, build_adapter
 from argus_iris.broker.config import BrokerConfig, NodeConfig, ServiceConfig
 from argus_iris.broker.leases import LeaseBook, LeaseRecord
 from argus_iris.broker.policy import Policy
+from argus_iris.broker.registry import Registry
 from argus_iris.broker.residency import Residency
 from argus_iris.models import (
     GpuProcess,
@@ -250,6 +253,12 @@ class Broker:
         self.stopped: dict[str, str] = {}
         self.residency = Residency(self, self.policy)
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(config.agent_timeout_s))
+        # Tenants' manifests and announced agents (registry.py): loaded before anything reads config.nodes/services,
+        # since registered nodes and services join those same collections.
+        state_dir = os.environ.get("IRIS_STATE_DIR") or config.state_dir
+        self.registry = Registry(config, state_dir=Path(state_dir) if state_dir else None)
+        self.registry.load()
+        self.registry.reconcile()
         self._adapters = {s.id: build_adapter(s) for s in config.services}
         self.nodes: dict[str, NodeState] = {
             name: NodeState(name=name, agent_url=cfg.agent_url, reachable=False) for name, cfg in config.nodes.items()
@@ -268,6 +277,8 @@ class Broker:
             pinned=self.residency.protected,
             policy=self.policy,
         )
+        for reg in self.registry.tenants.values():
+            self.leases.register(reg.manifest)
         self._tasks: set[asyncio.Task] = set()
 
     async def aclose(self) -> None:
@@ -289,6 +300,7 @@ class Broker:
         snapshot, error = snap_result
         if snapshot is not None:
             self._last_seen[name] = utcnow()
+            self.registry.observe(name, snapshot.inventory)
         return compose_node(
             name,
             cfg,
@@ -404,6 +416,30 @@ class Broker:
         for name, state in zip(names, states, strict=True):
             self._apply(name, state)
         self.polls += 1
+        if self.reconcile():
+            # A registered service appeared or went with this poll's inventories: show it now, not a poll later.
+            names = list(self.config.nodes)
+            states = await asyncio.gather(*(self._poll_node(n, self.config.nodes[n]) for n in names))
+            for name, state in zip(names, states, strict=True):
+                self._apply(name, state)
+
+    def reconcile(self) -> bool:
+        """Bring nodes, services and adapters in line with the registry (a registration, a lapse, an announced
+        node, or a container that came or went). True when the services changed."""
+        changed = self.registry.reconcile()
+        if changed:
+            adapters = {}
+            for s in self.config.services:
+                old = self._adapters.get(s.id)
+                adapters[s.id] = old if old is not None and old.service is s else build_adapter(s)
+            self._adapters = adapters
+        for name, cfg in self.config.nodes.items():
+            if name not in self.nodes:
+                self.nodes[name] = NodeState(name=name, agent_url=cfg.agent_url, reachable=False)
+        for name in set(self.nodes) - set(self.config.nodes):
+            del self.nodes[name]
+            self._fingerprints.pop(name, None)
+        return changed
 
     async def refresh(self, name: str) -> NodeState:
         """Poll one node now (after an action, to see its effect) and publish the change."""

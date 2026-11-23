@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from argus_cortex.gpu_broker import BrokerCoordinator, BrokerError
-from argus_cortex.gpu_wire import GpuConstraints, Heartbeat, LeaseRelease, LeaseRequest, TenantManifest
+from argus_cortex.gpu_wire import LEASE_VERSION, GpuConstraints, Heartbeat, LeaseRelease, LeaseRequest, TenantManifest
 from fastapi.testclient import TestClient
 
 from argus_iris.broker.config import BrokerConfig
@@ -397,7 +397,7 @@ def test_routes_and_auth(monkeypatch):
 
     # No token configured: the lease routes are open (the token is optional, DESIGN.md "API").
     status = client.post("/leases", json=body).json()
-    assert (status["state"], status["node"], status["lease_version"]) == ("granted", "dragon", "1.0")
+    assert (status["state"], status["node"], status["lease_version"]) == ("granted", "dragon", LEASE_VERSION)
     lid = status["lease_id"]
     assert client.get(f"/leases/{lid}").json()["state"] == "granted"
     assert client.post(f"/leases/{lid}/heartbeat", json={}).json()["state"] == "granted"
