@@ -5,9 +5,11 @@ from pathlib import Path
 
 import httpx
 import pytest
+from argus_cortex.service import ServiceHealth
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+import argus_iris
 from argus_iris.broker.config import BrokerConfig, load_config
 from argus_iris.broker.state import Broker
 from argus_iris.models import GpuInfo, GpuProcess, NodeSnapshot
@@ -182,6 +184,23 @@ def test_http_api() -> None:
         client.portal.call(broker.poll_once)
         health = client.get("/health").json()
         assert health["agents"] == {"morpheus": True, "dragon": True} and health["mode"] == "observe-only"
+        # Every field /health had before argus-cortex's ServiceHealth, with the same meaning.
+        assert health["status"] == "ok" and health["version"] == argus_iris.__version__
+        assert {"polls", "leases", "pins_missing", "crowded_out", "registered"} <= set(health)
+        assert health["leases"] == {"active": 0, "tenants": 0}
+        assert set(health["registered"]) == {"tenants", "services", "nodes"}
+        # And it is the suite's contract: who it is, the wire versions it speaks, its dependency checks.
+        contract = ServiceHealth.model_validate(health)
+        assert contract.service == "argus-iris" and contract.checks["agents"].ok
+        assert set(contract.wire) == {"lease_version", "tenant_version", "resident_version", "directory_version"}
+        assert client.get("/health", params={"checks": "0"}).json()["checks"] == {}
+        # An unreachable agent is degraded on the very next read (the check is not cached), and still a 200.
+        broker.nodes["dragon"].reachable = False
+        r = client.get("/health")
+        assert r.status_code == 200 and r.json()["status"] == "degraded" and r.json()["agents"]["dragon"] is False
+        assert r.json()["checks"]["agents"]["detail"] == "1 of 2 unreachable"
+        broker.nodes["dragon"].reachable = True
+        assert client.get("/health").json()["status"] == "ok"
         assert {n["name"] for n in client.get("/nodes").json()} == {"morpheus", "dragon"}
         assert client.get("/nodes/jarrah").status_code == 404
         assert [r["node"] for r in client.get("/residents", params={"node": "dragon"}).json()] == ["dragon"]

@@ -6,6 +6,12 @@ services:
     container_name: iris-agent
     command: ["argus-iris", "agent"]
     restart: unless-stopped
+    # Listed in the broker's service directory under its own name, with the health it serves (argus-cortex#212).
+    labels:
+      argus.peer: iris-agent
+      argus.service: argus-iris
+      argus.health: /health
+      argus.port: "9110"
     runtime: nvidia
     pid: host                     # NVML reports host PIDs
     cgroup: host                  # else /proc/<pid>/cgroup paths are relative (/../..) and anon memory is unreadable
@@ -20,6 +26,7 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: utility,compute
+      ARGUS_PEER: iris-agent      # the argus.peer label above, repeated for /health
       IRIS_AGENT_NODE: ${IRIS_AGENT_NODE:?set to morpheus, dragon or jarrah}
       IRIS_AGENT_POLL_S: ${IRIS_AGENT_POLL_S:-5}
       # Broker→agent token. Unset disables container actions entirely.

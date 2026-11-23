@@ -6,8 +6,10 @@ from pathlib import Path
 
 import httpx
 import pytest
+from argus_cortex.service import ServiceHealth
 from fastapi.testclient import TestClient
 
+import argus_iris
 from argus_iris.agent.app import Agent, AgentSettings, create_app
 from argus_iris.agent.docker import DockerClient, DockerError
 from argus_iris.agent.nvml import RawProcess, Sample
@@ -153,13 +155,31 @@ def test_snapshot_health_and_metrics(host) -> None:
     agent = make_agent(host, FakeDocker())
     with TestClient(create_app(agent=agent, poll=False)) as client:
         assert client.get("/snapshot").status_code == 503
+        early = client.get("/health")  # no sample yet: degraded as before, and a 200 (never "starting")
+        assert early.status_code == 200 and early.json()["status"] == "degraded"
+        assert early.json()["checks"]["nvml"]["detail"] == "no sample yet"
         client.portal.call(agent.poll_once)
         body = client.get("/snapshot").json()
         assert body["node"] == "morpheus" and len(body["processes"]) == 2
-        assert client.get("/health").json()["status"] == "ok"
+        health = client.get("/health").json()
+        assert health["status"] == "ok"
+        # Every field /health had before argus-cortex's ServiceHealth, with the same meaning.
+        assert health["node"] == "morpheus" and health["version"] == argus_iris.__version__
+        assert (
+            health["nvml_error"] is None
+            and health["docker_error"] is None
+            and isinstance(health["last_poll_age_s"], float)
+        )
+        assert health["actions_enabled"] is bool(agent.settings.token)
+        contract = ServiceHealth.model_validate(health)
+        assert contract.service == "argus-iris" and contract.checks["nvml"].ok
         metrics = client.get("/metrics").text
         assert 'iris_agent_process_vram_mb{container="voluptas_comfyui"' in metrics
         assert 'iris_agent_container_anon_mb{container="voluptas_comfyui",node="morpheus"} 6144.0' in metrics
+        agent._sample = lambda: Sample(error="NVMLError: GPU is lost")
+        client.portal.call(agent.poll_once)
+        lost = client.get("/health").json()
+        assert lost["status"] == "degraded" and lost["nvml_error"] and not lost["checks"]["nvml"]["ok"]
 
 
 def test_container_actions_are_token_and_allowlist_gated(host) -> None:

@@ -7,6 +7,12 @@ services:
     container_name: argus-iris
     command: ["argus-iris", "serve"]
     restart: unless-stopped
+    # How the suite finds this service: iris's own directory lists containers by these labels (argus-cortex#212).
+    labels:
+      argus.peer: iris
+      argus.service: argus-iris
+      argus.health: /health
+      argus.port: "8120"
     ports:
       - "${HOST_IP:-0.0.0.0}:8120:8120"
     volumes:
@@ -15,10 +21,17 @@ services:
       - ${IRIS_POLICY_FILE:-./policy.example.yaml}:/etc/argus-iris/policy.yaml:ro
       # Registrations (tenant manifests, the admin tokens they came with, announced nodes) across restarts.
       - iris-state:/var/lib/argus-iris
+      # The suite file (argus_cortex.settings): the broker takes the tokens its config names (ARGUS_GPU_BROKER_TOKEN,
+      # IRIS_AGENT_TOKEN, each token_env) from it when they are blank below. Commented out because compose has no
+      # optional bind mount: with no file on the host, Docker would create a directory there. This container runs as
+      # root, so the mounted file must be root-owned and not readable or writable by others (root:root, mode 600);
+      # a file owned by your own user is refused, with a warning.
+      # - /etc/argus/suite.env:/etc/argus/suite.env:ro
     environment:
       IRIS_CONFIG: /etc/argus-iris/iris.yaml
       IRIS_POLICY: /etc/argus-iris/policy.yaml
       IRIS_STATE_DIR: /var/lib/argus-iris
+      ARGUS_PEER: iris            # the argus.peer label above, repeated for /health (a process cannot read its labels)
       # Callers' token (what argus-cortex's client sends). Manual actions such as warm are disabled while unset.
       ARGUS_GPU_BROKER_TOKEN: ${ARGUS_GPU_BROKER_TOKEN:-}
       # Sent to the agents for container actions; must match each agent's IRIS_AGENT_TOKEN.

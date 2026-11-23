@@ -12,6 +12,10 @@ whose compose file labels it ``argus.peer: <name>`` (argus-cortex#210, #212) is 
   down by its HTTP status. Only those fields are kept, never the body.
 - **Config wins:** ``peers:`` in the broker config names URLs (a host with no agent, a service outside Docker) that
   come first for that peer.
+- **Wire:** the entries and the lookup reply are argus-cortex's ``service.DirectoryEntry``, ``EntryHealth`` and
+  ``PeerLookup`` (#50), the models cortex's ``peers`` client reads. They are frozen, so an entry is replaced, never
+  changed in place. A container whose labels cortex's model refuses (a peer name outside ``PEER_NAME_PATTERN``, a
+  health path with a space) is left out and logged once: one bad label never takes the directory down.
 
 Read-only: nothing here starts, stops or changes a service.
 """
@@ -27,15 +31,18 @@ from urllib.parse import urlsplit
 
 import httpx
 import structlog
+from argus_cortex.service import DependencyCheck, DirectoryEntry, EntryHealth, PeerLookup, ServiceHealth
+from pydantic import ValidationError
 
 from argus_iris.broker.config import BrokerConfig
 from argus_iris.broker.registry import container_port, host_of
-from argus_iris.models import ContainerEntry, DependencyCheck, DirectoryEntry, EntryHealth, PeerLookup, utcnow
+from argus_iris.models import ContainerEntry, utcnow
 
 log = structlog.get_logger("argus_iris.directory")
 
 PEER, SERVICE, HEALTH, PORT = "argus.peer", "argus.service", "argus.health", "argus.port"
 STATUSES = ("ok", "degraded", "starting")
+_MAX_ITEMS = 32  # of wire versions, capabilities and checks kept from one health body
 _RANK = {"ok": 0, "degraded": 1, "starting": 2, None: 3, "down": 4}
 
 
@@ -43,40 +50,73 @@ def _text(v: Any, limit: int = 200) -> str | None:
     return str(v)[:limit] if isinstance(v, str | int | float) and not isinstance(v, bool) else None
 
 
-def read_health(status_code: int | None, body: Any, *, error: str | None = None) -> EntryHealth:
-    """An :class:`EntryHealth` from a ``/health`` answer, whatever its shape."""
-    now = utcnow()
+def _contract(data: dict[str, Any]) -> ServiceHealth | None:
+    """The body as argus-cortex's ``ServiceHealth``, or None when it is not one (or speaks another major)."""
+    try:
+        return ServiceHealth.model_validate(data)
+    except ValueError:  # pydantic's ValidationError is one
+        return None
+
+
+def _tolerant_checks(raw: Any) -> dict[str, DependencyCheck]:
+    checks: dict[str, DependencyCheck] = {}
+    if isinstance(raw, dict):
+        for name, c in list(raw.items())[:_MAX_ITEMS]:
+            if isinstance(c, dict) and isinstance(c.get("ok"), bool):
+                checks[str(name)[:64]] = DependencyCheck(ok=c["ok"], detail=_text(c.get("detail")))
+    return checks
+
+
+def read_health(
+    status_code: int | None, body: Any, *, error: str | None = None, now: datetime | None = None
+) -> EntryHealth:
+    """An :class:`EntryHealth` from a ``/health`` answer, whatever its shape.
+
+    A body that validates as cortex's ``ServiceHealth`` is read through that model (``contract``). Anything else is
+    read field by field, best-effort, and is up or down by its HTTP status. Either way only the directory's own
+    fields are kept, bounded in number and length, never the body."""
+    now = now or utcnow()
     if status_code is None:
-        return EntryHealth(checked_at=now, status="down", error=error)
+        return EntryHealth(checked_at=now, status="down", error=error[:200] if error else None)
     data = body if isinstance(body, dict) else {}
-    said = data.get("status") if data.get("status") in STATUSES else None
+    health = _contract(data)
+    if health is not None:
+        said: str | None = health.status
+        fields: dict[str, Any] = {
+            "service": health.service,
+            "version": health.version,
+            "wire": {k[:64]: v[:32] for k, v in list(health.wire.items())[:_MAX_ITEMS]},
+            "capabilities": tuple(c[:64] for c in health.capabilities[:_MAX_ITEMS]),
+            "checks": {k[:64]: c for k, c in list(health.checks.items())[:_MAX_ITEMS]},
+        }
+    else:
+        said = data.get("status") if data.get("status") in STATUSES else None
+        wire = data.get("wire")
+        caps = data.get("capabilities")
+        fields = {
+            "service": _text(data.get("service"), 100),
+            "version": _text(data.get("version"), 100),
+            "wire": {str(k)[:64]: v[:32] for k, v in list(wire.items())[:_MAX_ITEMS] if isinstance(v, str)}
+            if isinstance(wire, dict)
+            else {},
+            "capabilities": tuple(c[:64] for c in caps[:_MAX_ITEMS] if isinstance(c, str))
+            if isinstance(caps, list)
+            else (),
+            "checks": _tolerant_checks(data.get("checks")),
+        }
     if status_code == 503:
         status = said or "starting"
     elif 200 <= status_code < 300:
         status = said or "ok"
     else:
         status = "down"
-    checks: dict[str, DependencyCheck] = {}
-    raw_checks = data.get("checks")
-    if isinstance(raw_checks, dict):
-        for name, c in list(raw_checks.items())[:32]:
-            if isinstance(c, dict) and isinstance(c.get("ok"), bool):
-                checks[str(name)[:64]] = DependencyCheck(ok=c["ok"], detail=_text(c.get("detail")))
-    wire = data.get("wire")
-    caps = data.get("capabilities")
     return EntryHealth(
         checked_at=now,
         status=status,
         http_status=status_code,
-        contract=all(isinstance(data.get(k), str) for k in ("service", "version", "status")),
-        service=_text(data.get("service"), 100),
-        version=_text(data.get("version"), 100),
-        wire={str(k)[:64]: str(v)[:32] for k, v in wire.items() if isinstance(v, str)}
-        if isinstance(wire, dict)
-        else {},
-        capabilities=[str(c)[:64] for c in caps[:32] if isinstance(c, str)] if isinstance(caps, list) else [],
-        checks=checks,
+        contract=health is not None,
         error=None if status != "down" else f"HTTP {status_code}",
+        **fields,
     )
 
 
@@ -87,18 +127,25 @@ class Directory:
         self._clock = clock
         self.entries: list[DirectoryEntry] = []
         self._health: dict[tuple[str, str | None, str | None], EntryHealth] = {}  # (peer, node, container|url)
+        self._refused: set[tuple[str, str]] = set()  # (node, container) already logged for a refused label
 
     @staticmethod
     def _key(e: DirectoryEntry) -> tuple[str, str | None, str | None]:
         return (e.peer, e.node, e.container or e.url)
 
+    def _with_health(self, e: DirectoryEntry) -> DirectoryEntry:
+        """*e* with its last health, and the service its health names when no label did. A copy: entries are frozen."""
+        h = self._health.get(self._key(e))
+        return e.model_copy(update={"health": h, "service": e.service or (h.service if h else None)})
+
     def rebuild(self, inventories: dict[str, list[ContainerEntry]]) -> None:
         """Entries from the config's peers and every node's last inventory, keeping each one's last health."""
         entries: list[DirectoryEntry] = [
-            DirectoryEntry(peer=peer, origin="config", url=url)
+            DirectoryEntry(peer=peer, origin="config", url=url)  # names and URLs were checked when the config loaded
             for peer, urls in self.config.peers.items()
             for url in urls
         ]
+        refused: set[tuple[str, str]] = set()
         for node in self.config.nodes:
             for c in inventories.get(node, []):
                 peer = (c.labels.get(PEER) or "").strip()
@@ -111,9 +158,9 @@ class Directory:
                 path = c.labels.get(HEALTH) or "/health"
                 if not path.startswith("/"):
                     path = f"/{path}"
-                entries.append(
-                    DirectoryEntry(
-                        peer=peer[:100],
+                try:
+                    entry = DirectoryEntry(
+                        peer=peer,
                         origin="label",
                         service=(c.labels.get(SERVICE) or None),
                         node=node,
@@ -121,13 +168,24 @@ class Directory:
                         running=c.running,
                         url=f"http://{host_of(self.config.nodes[node].agent_url)}:{port}" if port else None,
                         reason=None if port else why,
-                        health_path=path[:200],
+                        health_path=path,
                     )
-                )
-        for e in entries:
-            e.health = self._health.get(self._key(e))
-            if e.service is None and e.health and e.health.service:
-                e.service = e.health.service
+                except ValidationError as exc:
+                    # A label cortex's model refuses (a peer name callers could never ask for, a health path with a
+                    # space). Skip the container, say so once, and keep the rest of the directory.
+                    refused.add((node, c.name))
+                    if (node, c.name) not in self._refused:
+                        log.warning(
+                            "directory_label_refused",
+                            node=node,
+                            container=c.name,
+                            fields=sorted({str(e["loc"][0]) for e in exc.errors() if e["loc"]}),
+                            peer=peer[:100],
+                        )
+                    continue
+                entries.append(entry)
+        self._refused = refused
+        entries = [self._with_health(e) for e in entries]
         keys = {self._key(e) for e in entries}
         self._health = {k: h for k, h in self._health.items() if k in keys}
         self.entries = entries
@@ -145,15 +203,13 @@ class Directory:
         results = await asyncio.gather(*(self._probe_one(e) for e in targets))
         now = self._clock()
         for e, h in zip(targets, results, strict=True):
-            h.checked_at = now  # the directory's clock, so "due" is measured on one clock
-            self._health[self._key(e)] = h
-            e.health = h
-            if e.service is None and h.service:
-                e.service = h.service
+            # The directory's clock, so "due" is measured on one clock.
+            self._health[self._key(e)] = h.model_copy(update={"checked_at": now})
         for e in self.entries:
             if not e.running:
                 self._health.pop(self._key(e), None)
-                e.health = None
+        # Entries are frozen and a rebuild may have replaced the list meanwhile: attach to the current one.
+        self.entries = [self._with_health(e) for e in self.entries]
 
     async def _probe_one(self, e: DirectoryEntry) -> EntryHealth:
         try:
@@ -166,8 +222,9 @@ class Directory:
             body = None
         return read_health(resp.status_code, body)
 
-    def lookup(self, peer: str) -> PeerLookup:
-        """Where to reach *peer*, best first: configured, then running and healthiest, then node order."""
+    def lookup(self, peer: str) -> PeerLookup | None:
+        """Where to reach *peer*, best first: configured, then running and healthiest, then node order. None when
+        *peer* is not a name a peer can have, so nothing could be listed under it."""
         order = {n: i for i, n in enumerate(self.config.nodes)}
         hits = [e for e in self.entries if e.peer == peer and e.url and e.running]
         hits.sort(
@@ -177,7 +234,10 @@ class Directory:
                 order.get(e.node or "", len(order)),
             )
         )
-        return PeerLookup(peer=peer, urls=hits)
+        try:
+            return PeerLookup(peer=peer, urls=hits)
+        except ValidationError:
+            return None
 
     def service_discovery(self) -> list[dict[str, Any]]:
         """Prometheus ``http_sd`` target groups: one per reachable, running entry."""

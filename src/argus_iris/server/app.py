@@ -19,6 +19,9 @@ from pathlib import Path
 
 import structlog
 from argus_cortex.gpu_wire import (
+    LEASE_VERSION,
+    RESIDENT_VERSION,
+    TENANT_VERSION,
     Heartbeat,
     HeartbeatReply,
     LeaseRelease,
@@ -27,6 +30,7 @@ from argus_cortex.gpu_wire import (
     TenantManifest,
 )
 from argus_cortex.server import WriteGuard, cross_site_refuse
+from argus_cortex.service import DIRECTORY_VERSION, DependencyCheck, DirectoryEntry, PeerLookup, install_health
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -41,7 +45,7 @@ from argus_iris.broker.leases import LeaseConflict, LeaseRecord
 from argus_iris.broker.policy import Policy, load_policy
 from argus_iris.broker.registry import RegistrationError
 from argus_iris.broker.state import Broker
-from argus_iris.models import DirectoryEntry, NodeState, PeerLookup, Resident
+from argus_iris.models import NodeState, Resident
 
 log = structlog.get_logger("argus_iris.server")
 
@@ -205,16 +209,19 @@ def create_app(
     app.add_middleware(WriteGuard, refuse=cross_site_refuse(config.trusted_origins))
     app.state.broker = broker
 
-    @app.get("/health")
-    async def health() -> dict:
-        agents = {name: s.reachable for name, s in broker.nodes.items()}
+    # /health is argus-cortex's ServiceHealth, with the broker's own fields beside it. `status` keeps its meaning:
+    # degraded while an agent is unreachable, read from the broker's last poll (so never cached: ttl 0), and never
+    # 503, since the broker has no loading phase.
+    async def agents_reachable() -> DependencyCheck:
+        down = sum(not s.reachable for s in broker.nodes.values())
+        return DependencyCheck(ok=not down, detail=f"{down} of {len(broker.nodes)} unreachable" if down else None)
+
+    def own_health() -> dict:
         return {
-            "status": "ok" if all(agents.values()) else "degraded",
-            "version": argus_iris.__version__,
             "mode": "observe-only" if config.admission == "observe" else "admission",
             "polls": broker.polls,
             "leases": {"active": len(broker.leases.active()), "tenants": len(broker.leases.tenants)},
-            "agents": agents,
+            "agents": {name: s.reachable for name, s in broker.nodes.items()},
             "pins_missing": broker.residency.missing_pins(),
             "crowded_out": broker.crowded(),
             "registered": {
@@ -223,6 +230,21 @@ def create_app(
                 "nodes": len(broker.registry.announced),
             },
         }
+
+    install_health(
+        app,
+        service="argus-iris",
+        version=argus_iris.__version__,
+        wire={
+            "lease_version": LEASE_VERSION,
+            "tenant_version": TENANT_VERSION,
+            "resident_version": RESIDENT_VERSION,
+            "directory_version": DIRECTORY_VERSION,
+        },
+        checks={"agents": agents_reachable},
+        extra=own_health,
+        check_ttl_s=0,
+    )
 
     @app.get("/nodes", response_model=list[NodeState])
     async def nodes() -> list[NodeState]:
@@ -375,7 +397,7 @@ def create_app(
         presents it: with no token, POST /tenants is open to the LAN."""
         check_caller(authorization, required=True)
         found = broker.directory.lookup(peer)
-        if not found.urls:
+        if found is None or not found.urls:  # a name no peer can have is "not found" too, as cortex's client reads it
             raise HTTPException(404, f"no reachable peer {peer!r}")
         return found
 
