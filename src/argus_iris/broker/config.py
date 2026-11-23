@@ -7,11 +7,13 @@ idle-kill) and tenant manifests are later rollout steps and get their own files.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 import yaml
+from argus_cortex.peers import PEER_NAME_PATTERN
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 DEFAULT_HEADROOM_MB = 512
@@ -192,6 +194,9 @@ class BrokerConfig(BaseModel):
     @classmethod
     def _peer_urls(cls, v: dict[str, list[str]]) -> dict[str, list[str]]:
         for name, urls in v.items():
+            # The name callers ask for, as argus-cortex spells it: the directory's wire model refuses any other.
+            if len(name) > 100 or not re.fullmatch(PEER_NAME_PATTERN, name):
+                raise ValueError(f"peers.{name}: not a peer name (lowercase letters, digits and single hyphens)")
             for url in urls:
                 parts = urlsplit(url)
                 if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:

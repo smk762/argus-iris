@@ -14,6 +14,7 @@ from pathlib import Path
 
 import httpx
 import structlog
+from argus_cortex.service import DependencyCheck, install_health
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
@@ -25,6 +26,7 @@ from argus_iris.agent.docker import DEFAULT_SOCKET, MANAGE_LABEL, ContainerInfo,
 from argus_iris.agent.nvml import NvmlSampler, Sample
 from argus_iris.agent.tracker import ProcessTracker
 from argus_iris.models import (
+    SNAPSHOT_VERSION,
     ActionResult,
     ContainerAction,
     ContainerEntry,
@@ -356,19 +358,34 @@ def create_app(settings: AgentSettings | None = None, *, agent: Agent | None = N
             raise HTTPException(503, "no sample yet")
         return agent.snapshot
 
-    @app.get("/health")
-    async def health() -> dict:
+    # /health is argus-cortex's ServiceHealth, with the agent's own fields beside it. `status` keeps its meaning:
+    # degraded until the first sample and while NVML fails (read from the last poll, so never cached), never 503.
+    async def nvml_sampled() -> DependencyCheck:
+        snap = agent.snapshot
+        if snap is None:
+            return DependencyCheck(ok=False, detail="no sample yet")
+        return DependencyCheck(ok=not snap.nvml_error, detail="NVML error" if snap.nvml_error else None)
+
+    def own_health() -> dict:
         snap = agent.snapshot
         age = None if agent.last_poll_monotonic is None else round(time.monotonic() - agent.last_poll_monotonic, 1)
         return {
-            "status": "ok" if snap and not snap.nvml_error else "degraded",
             "node": settings.node,
-            "version": argus_iris.__version__,
             "last_poll_age_s": age,
             "nvml_error": snap.nvml_error if snap else None,
             "docker_error": agent.docker_error,
             "actions_enabled": bool(settings.token),
         }
+
+    install_health(
+        app,
+        service="argus-iris",
+        version=argus_iris.__version__,
+        wire={"snapshot_version": SNAPSHOT_VERSION},
+        checks={"nvml": nvml_sampled},
+        extra=own_health,
+        check_ttl_s=0,
+    )
 
     @app.get("/metrics")
     async def metrics() -> Response:

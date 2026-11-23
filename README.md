@@ -73,17 +73,44 @@ Any container whose compose file labels it `argus.peer: <name>` (the name caller
 `lens`) is listed in iris's service directory, GPU or not. iris finds it in the node agents' inventories and reaches it
 at the agent's host and the published port. The rules match registered residents: the optional `argus.port` label picks
 one when a container publishes several, and a loopback-only bind is reported and not served. Health comes from
-`argus.health` (default `/health`) every 30 s, read in full when it is argus-cortex's `ServiceHealth` and as up or down
-otherwise. `peers:` in `iris.yaml` adds URLs for peers outside the agents' view; configured peers come first.
+`argus.health` (default `/health`) every 30 s. A body that validates as argus-cortex's `ServiceHealth` is read through
+that model (`health.contract` is true); anything else is read field by field and is up or down by its HTTP status.
+`peers:` in `iris.yaml` adds URLs for peers outside the agents' view; configured peers come first.
+
+The entries and the lookup reply are argus-cortex's wire models (`argus_cortex.service.DirectoryEntry`, `EntryHealth`,
+`PeerLookup`; `directory_version` 1.0, `service-directory-schema.json`), the ones cortex's `peers` client reads. A peer
+name is lowercase letters, digits and single hyphens (`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`). A container labelled with
+anything else, or with a health path that is not a path, is left out of the directory and logged once
+(`directory_label_refused`); a `peers:` key that is not a peer name fails when the config loads.
 
 - `GET /directory`: every entry, with its URL (or why it has none) and health.
 - `GET /directory/{peer}`: where to reach a peer, best first (healthiest, then node order). Callers use it to find a
-  peer (argus-cortex#207). It decides where work is sent, so it needs `ARGUS_GPU_BROKER_TOKEN` set on the broker and
-  presented by the caller.
+  peer (`argus_cortex.peers.peer_url(..., discover=True)`). It decides where work is sent, so it needs
+  `ARGUS_GPU_BROKER_TOKEN` set on the broker and presented by the caller. A peer with nothing reachable, or a name no
+  peer can have, is a 404.
 - `GET /directory/sd`: Prometheus HTTP service discovery (`http_sd_configs`), one target per reachable service, labelled
   `argus_peer`, `argus_service`, `node`, `container` and `argus_health_path`.
 
 The dashboard's **Suite** view (`/ui/#suite`) lists them, with any failing checks at the top.
+
+iris is in its own directory: its compose files label the broker `argus.peer: iris` and each host's agent
+`argus.peer: iris-agent`.
+
+### Health
+
+`GET /health` on the broker and on the agent is argus-cortex's `ServiceHealth` (`service`, `version`, `status`,
+`started_at`, `wire`, `checks`, ...) with each one's own fields beside it, unchanged: the broker's `mode`, `polls`,
+`leases`, `agents`, `pins_missing`, `crowded_out` and `registered`; the agent's `node`, `last_poll_age_s`, `nvml_error`,
+`docker_error` and `actions_enabled`. `status` is `degraded` while the broker cannot reach an agent (check `agents`), or
+while the agent has no NVML sample (check `nvml`); both read the last poll, so they are never stale, and the route always
+answers 200. `GET /health?checks=0` skips the checks.
+
+### Suite settings
+
+`argus-iris serve` reads the tokens its config names (`caller_token_env`, `agent_token_env`, each service's
+`token_env`) from the suite file (`argus_cortex.settings`: `~/.config/argus/suite.env`, or `/etc/argus/suite.env` in a
+container) when the environment leaves them unset or blank. The environment wins, nothing else is taken from the file,
+and only the names are printed. `ARGUS_ENV_FILE=off` disables it. The agent does not read the file.
 
 ### Leases
 

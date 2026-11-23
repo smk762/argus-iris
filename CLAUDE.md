@@ -27,7 +27,8 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
 
 - `models.py` — agent snapshot (`NodeSnapshot`, `GpuProcess`, …) and the broker's read models (`NodeState`,
   `Resident`, `NodeLedger`). Lease and tenant-manifest models are **not** here: import them from
-  `argus_cortex.gpu_wire`.
+  `argus_cortex.gpu_wire`. Nor are the directory's (`PeerLookup`, `DirectoryEntry`, `EntryHealth`): they are
+  `argus_cortex.service`'s (#50).
 - `agent/` — `iris-agent` (`[agent]` extra, `argus-iris agent`, :9110). `nvml.py` samples, `tracker.py` keeps idle
   time (VRAM unchanged **and** no utilisation), `procfs.py` maps PIDs to containers through cgroups and reads anon
   memory, `docker.py` is a minimal Engine API client over the Unix socket, `app.py` serves `/snapshot`, `/metrics`,
@@ -64,11 +65,14 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
   Persisted to `$IRIS_STATE_DIR/registrations.json` (0600).
 - `broker/directory.py` — the service directory (#48): containers labelled `argus.peer` (the agent's inventory carries
   `argus.*` labels only) plus the config's `peers:`. URL by `registry.container_port` (shared with residents), health
-  read tolerantly as argus-cortex `ServiceHealth` (only parsed fields kept, never the body), probed when due
-  (`directory_health_s`). Routes `/directory`, `/directory/sd` (Prometheus http_sd), `/directory/{peer}` (needs the
+  parsed as argus-cortex `ServiceHealth` (`contract`), else read field by field (only parsed fields kept, bounded,
+  never the body), probed when due (`directory_health_s`). Entries are cortex's frozen `DirectoryEntry`: replace one
+  (`_with_health`), never assign to it. A label cortex's model refuses (peer name, health path) skips that container
+  with one `directory_label_refused` log line and must never raise; `lookup` of such a name is `None` (a 404). Routes `/directory`, `/directory/sd` (Prometheus http_sd), `/directory/{peer}` (needs the
   caller token: it decides where work goes). Read-only.
 - `server/app.py` — the broker API (`[server]` extra, `argus-iris serve`, :8120): `/nodes`, `/residents`, `/events`
-  (SSE: `node` and `lease` events), `/metrics`, `/health`, `/ui/`, `/services`, `/registry`, `POST`/`DELETE /nodes`, `DELETE /tenants/{t}`, the lease routes (`POST /tenants`, `POST /leases`,
+  (SSE: `node` and `lease` events), `/metrics`, `/health` (cortex's `install_health`: `ServiceHealth` plus the broker's
+  own fields through `extra`; the agent's is the same; add a field there, never rename one), `/ui/`, `/services`, `/registry`, `POST`/`DELETE /nodes`, `DELETE /tenants/{t}`, the lease routes (`POST /tenants`, `POST /leases`,
   `GET /leases/{id}?wait_s=`, `.../heartbeat`, `.../release`, `GET /leases`, `/queue`, `/tenants`; bearer token
   checked only when `ARGUS_GPU_BROKER_TOKEN` is set) `POST /services/{id}/warm` and `POST /residents/{id}/evict` (resident ids contain slashes; both need that token). Wrapped in
   cortex's `WriteGuard`. Test the lease routes with cortex's own `BrokerCoordinator` over `httpx.ASGITransport`.
@@ -79,7 +83,9 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
   argus-cortex `brand/packages/iris` (never edit; re-copy). `vendor/dh/` holds
   `dh-tokens.css` and `dh-theme.js`, copied unchanged from dh-shared 1.2.8 (via argus-sightline): **never edit them**.
   Re-copy them from a newer sync instead. Colours come from `--dh-*` tokens only.
-- `cli.py` — Typer app; entry point `argus-iris` (`serve`, `agent`, `version`).
+- `cli.py` — Typer app; entry point `argus-iris` (`serve`, `agent`, `version`). `serve` calls
+  `argus_cortex.settings.apply()` for the token names the config gives, and no others; the agent never reads the suite
+  file. Tests run with `ARGUS_ENV_FILE=off` (`tests/conftest.py`); use made-up variable names in them.
 - `compose.yaml` includes `deploy/broker.compose.yaml` and `deploy/agent.compose.yaml` with `deploy/.env` (project
   `argus-iris`); `deploy/` — example broker config, policy, and the compose files for the broker and the agents.
 

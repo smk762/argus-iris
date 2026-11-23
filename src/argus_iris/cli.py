@@ -18,12 +18,21 @@ def serve(
 ) -> None:
     """Run the broker."""
     import uvicorn  # noqa: PLC0415
+    from argus_cortex import settings  # noqa: PLC0415
 
     from argus_iris.broker.config import load_config  # noqa: PLC0415
     from argus_iris.broker.policy import load_policy  # noqa: PLC0415
     from argus_iris.server.app import create_app  # noqa: PLC0415
 
-    uvicorn.run(create_app(load_config(config), policy=load_policy(policy)), host=host, port=port)
+    # The broker reads its tokens from the environment, by the names its config gives (caller_token_env,
+    # agent_token_env, each service's token_env). Take those, and only those, from the suite file where the
+    # environment sets none. The names are logged, never a value.
+    cfg = load_config(config)
+    names = {cfg.caller_token_env, cfg.agent_token_env, *(s.token_env for s in cfg.services if s.token_env)}
+    applied = settings.apply(names)
+    if applied:
+        typer.echo(f"suite settings: {', '.join(applied)} read from the suite file", err=True)
+    uvicorn.run(create_app(cfg, policy=load_policy(policy)), host=host, port=port)
 
 
 @app.command()
