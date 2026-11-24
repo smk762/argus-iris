@@ -13,7 +13,7 @@ from argus_cortex.gpu_wire import TenantManifest
 from fastapi.testclient import TestClient
 
 from argus_iris.broker.config import BrokerConfig, RegisteredService
-from argus_iris.broker.registry import RegistrationError, Registry
+from argus_iris.broker.registry import RegistrationError, Registry, _same_id
 from argus_iris.broker.state import Broker
 from argus_iris.models import ContainerEntry, GpuInfo, NodeSnapshot, PortMap
 from argus_iris.server.app import create_app
@@ -376,3 +376,67 @@ def test_a_loopback_only_port_is_not_placed_and_says_why() -> None:
     assert reasons["xtts"] == "argus-echo-xtts publishes 8141 on 127.0.0.1 only: bind it to the LAN or 0.0.0.0"
     # Several published ports, one of them reachable: that one, no `port` needed.
     assert [(s.id, s.base_url) for s in reg.services] == [("whisper", "http://192.168.1.198:8144")]
+
+
+def test_a_node_moved_into_the_config_cannot_be_forgotten(tmp_path: Path) -> None:
+    reg, _ = registry(tmp_path)
+    reg.announce("jarrah", "http://192.168.1.109:9110")
+    nodes = {**CONFIG["nodes"], "jarrah": {"agent_url": "http://192.168.1.109:9110"}}
+    again, _ = registry(tmp_path, nodes=nodes)
+    again.load()
+    assert "jarrah" not in again.announced  # the config's now; the saved announcement is stale
+    assert not again.forget_node("jarrah") and "jarrah" in again.config.nodes
+
+
+@pytest.mark.parametrize("short", ["a", "ab", "abcdef01234", "abcdef01234z"])
+def test_short_or_malformed_ids_match_no_other_container(short: str) -> None:
+    full = "abcdef012345" + "0" * 52
+    assert not _same_id(short, full) and not _same_id(full, short)
+    assert _same_id(full[:12], full) and _same_id(full, full[:12]) and not _same_id("", "")
+    reg, _ = registry()
+    reg.register(ECHO, token="one", container_id=full)
+    reg.register(ECHO, token="two", container_id="f" * 64)
+    # The instance renewed last, not one whose id merely begins the same.
+    assert reg.tenants["argus-echo"].token_for(short) == reg.tenants["argus-echo"].token_for()
+
+
+def test_a_changed_admin_token_is_a_change() -> None:
+    reg, _ = registry()
+    assert reg.register(ECHO)
+    assert not reg.register(ECHO)
+    assert reg.register(ECHO, token="t\u00f6ken") and not reg.register(ECHO, token="t\u00f6ken")
+    assert reg.register(ECHO, token="other") and reg.register(ECHO)
+
+
+@pytest.mark.parametrize("agent_up", [True, False])
+async def test_a_node_forgotten_mid_poll_stays_forgotten(agent_up: bool) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "192.168.1.109":
+            if broker.registry.forget_node("jarrah"):  # while its snapshot is on the way
+                broker.reconcile()
+            if not agent_up:
+                return httpx.Response(503)
+        return agents(request)
+
+    broker = Broker(
+        BrokerConfig.model_validate(CONFIG), client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    broker.registry.announce("jarrah", "http://192.168.1.109:9110")
+    broker.reconcile()
+    await broker.poll_once()
+    assert set(broker.nodes) == {"morpheus", "dragon"} and broker.polls == 1
+    assert broker.nodes["dragon"].reachable
+    assert "jarrah" not in broker.registry.inventory and "jarrah" not in broker._last_seen
+
+
+async def test_a_forgotten_nodes_state_is_not_inherited() -> None:
+    broker = Broker(
+        BrokerConfig.model_validate(CONFIG), client=httpx.AsyncClient(transport=httpx.MockTransport(agents))
+    )
+    broker.registry.announce("jarrah", "http://192.168.1.109:9110")
+    await broker.poll_once()
+    broker._crowded["jarrah"] = {"svc"}
+    assert "jarrah" in broker._last_seen
+    broker.registry.forget_node("jarrah")
+    broker.reconcile()
+    assert "jarrah" not in broker._crowded and "jarrah" not in broker._last_seen

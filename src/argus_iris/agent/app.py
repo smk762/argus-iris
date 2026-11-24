@@ -322,7 +322,10 @@ def create_app(settings: AgentSettings | None = None, *, agent: Agent | None = N
     async def _announcer() -> None:
         async with httpx.AsyncClient() as client:
             while True:
-                await agent.announce(client)
+                try:
+                    await agent.announce(client)
+                except Exception:  # noqa: BLE001 - keep announcing; the failure is logged
+                    log.exception("agent_announce_failed")
                 await asyncio.sleep(settings.announce_s)
 
     @contextlib.asynccontextmanager
@@ -342,12 +345,15 @@ def create_app(settings: AgentSettings | None = None, *, agent: Agent | None = N
         try:
             yield
         finally:
-            for t in (task, announcer):
-                if t:
+            try:
+                running = [t for t in (task, announcer) if t]
+                for t in running:
                     t.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await t
-            await agent.aclose()
+                for t, res in zip(running, await asyncio.gather(*running, return_exceptions=True), strict=True):
+                    if isinstance(res, Exception):  # CancelledError is not one
+                        log.error("agent_task_failed", task=t.get_name(), error=repr(res))
+            finally:
+                await agent.aclose()
 
     app = FastAPI(title="iris-agent", version=argus_iris.__version__, lifespan=lifespan)
     app.state.agent = agent

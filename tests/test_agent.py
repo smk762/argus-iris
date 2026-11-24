@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import threading
 from pathlib import Path
 
 import httpx
@@ -296,3 +297,26 @@ async def test_announce_posts_node_with_agent_token(host) -> None:
     req = seen[0]
     assert req.url == "http://broker:8120/nodes" and req.headers["authorization"] == f"Bearer {TOKEN}"
     assert json.loads(req.content) == {"name": "morpheus", "agent_url": None, "port": 9110, "gpu": 0}
+
+
+def test_a_failing_announce_is_retried_and_never_breaks_shutdown(host, monkeypatch) -> None:
+    agent = make_agent(host, FakeDocker())
+    agent.settings = dataclasses.replace(agent.settings, broker_url="http://broker:8120", announce_s=0.01, poll_s=0.01)
+    calls: list[int] = []
+    closed: list[bool] = []
+    again = threading.Event()
+
+    async def announce(client: httpx.AsyncClient) -> bool:
+        calls.append(1)
+        if len(calls) >= 2:
+            again.set()
+        raise httpx.InvalidURL("no such broker")
+
+    async def aclose() -> None:
+        closed.append(True)
+
+    monkeypatch.setattr(agent, "announce", announce)
+    monkeypatch.setattr(agent, "aclose", aclose)
+    with TestClient(create_app(agent=agent)):
+        assert again.wait(5)
+    assert closed == [True]

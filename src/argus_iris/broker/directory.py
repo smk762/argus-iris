@@ -247,20 +247,25 @@ class Directory:
         targets = [e for e in self.entries if (e.url and e.running) and (all_ or self._due(e))]
         results = await asyncio.gather(*(self._probe_one(e) for e in targets))
         now = self._clock()
+        # A rebuild may have replaced the entries meanwhile: keep a result only while its entry is still listed at the
+        # address that was probed.
+        live = {(self._key(e), e.url, e.health_path) for e in self.entries}
         for e, h in zip(targets, results, strict=True):
+            if (self._key(e), e.url, e.health_path) not in live:
+                continue
             # The directory's clock, so "due" is measured on one clock.
             self._health[self._key(e)] = h.model_copy(update={"checked_at": now})
         for e in self.entries:
             if not e.running:
                 self._health.pop(self._key(e), None)
-        # Entries are frozen and a rebuild may have replaced the list meanwhile: attach to the current one.
+        # Entries are frozen: attach to the current list, not to the targets.
         self.entries = [self._with_health(e) for e in self.entries]
 
     async def _probe_one(self, e: DirectoryEntry) -> EntryHealth:
         try:
             base = self._probe_base.get(self._key(e), e.url)
             resp = await self._client.get(f"{base}{e.health_path}", timeout=self.config.directory_probe_timeout_s)
-        except httpx.HTTPError as exc:
+        except Exception as exc:  # noqa: BLE001 - InvalidURL (a label's path) is no HTTPError; one entry, not the round
             return read_health(None, None, error=f"{type(exc).__name__}: {exc}"[:200])
         try:
             body = resp.json()

@@ -22,6 +22,7 @@ Everything is in memory, and written to ``<state_dir>/registrations.json`` when 
 from __future__ import annotations
 
 import contextlib
+import hmac
 import json
 import os
 import re
@@ -86,7 +87,7 @@ class Registration:
         """The admin token of the instance running in *container_id*, else the one renewed last that sent any."""
         if container_id:
             for cid, inst in self.instances.items():
-                if cid and (container_id.startswith(cid) or cid.startswith(container_id)) and inst.token:
+                if _same_id(container_id, cid) and inst.token:
                     return inst.token
         ranked = sorted(self.instances.values(), key=lambda i: i.seen_at, reverse=True)
         return next((i.token for i in ranked if i.token), None)
@@ -143,7 +144,7 @@ class Registry:
             changed = True
         else:
             inst = reg.instances.get(key)
-            changed = inst is None or inst.token != token
+            changed = inst is None or not _same_secret(inst.token, token)
         reg.instances[key] = Instance(token, now)
         # Instances gone well past the lapse (containers recreated under new ids) are dropped, so the map stays small.
         stale = now - timedelta(seconds=4 * self.config.registration_ttl_s)
@@ -209,6 +210,8 @@ class Registry:
         return "changed" if was else "added"
 
     def forget_node(self, name: str) -> bool:
+        if name in self.configured_nodes:
+            return False  # the config file's, whatever an agent announced
         if self.announced.pop(name, None) is None:
             return False
         self.config.nodes.pop(name, None)
@@ -484,7 +487,7 @@ class Registry:
                 log.warning("registration_skipped", tenant=t, error=str(exc)[:300])
         for n, row in (data.get("nodes") or {}).items():
             with contextlib.suppress(KeyError, TypeError, ValueError, RegistrationError):
-                if NODE_NAME.fullmatch(n):
+                if NODE_NAME.fullmatch(n) and n not in self.configured_nodes:  # config wins; the entry is stale
                     self.announced[n] = AnnouncedNode(
                         _agent_url(row["agent_url"]),
                         int(row.get("gpu", 0)),
@@ -499,8 +502,16 @@ class Registry:
 
 
 def _same_id(a: str, b: str) -> bool:
-    """Docker ids, one maybe the 12-character short form."""
-    return bool(a and b) and (a.startswith(b) or b.startswith(a))
+    """Docker ids, one maybe the 12-character short form. Anything shorter, or not hex, matches only itself."""
+    if not (CONTAINER_ID.fullmatch(a) and CONTAINER_ID.fullmatch(b)):
+        return bool(a) and a == b
+    return a.startswith(b) or b.startswith(a)
+
+
+def _same_secret(a: str | None, b: str | None) -> bool:
+    if a is None or b is None:
+        return a is b
+    return hmac.compare_digest(a.encode(errors="surrogatepass"), b.encode(errors="surrogatepass"))
 
 
 def _fingerprint(services: list[ServiceConfig]) -> list[str]:

@@ -505,21 +505,29 @@ function renderSuite() {
 }
 
 let registryTimer = null;
+let registryRead = 0; // the latest read: an older one that answers later is ignored
+let nodeEvents = 0;
+const nodeHeard = new Map(); // node -> nodeEvents at its last event
 async function loadRegistry() {
+  const read = ++registryRead;
+  const asOf = nodeEvents;
   try {
     const [s, r, d] = await Promise.all([fetch(api("services")), fetch(api("registry")), fetch(api("directory"))]);
     if (!s.ok || !r.ok) throw new Error(`HTTP ${s.ok ? r.status : s.status}`);
-    [services, registry] = [await s.json(), await r.json()];
-    directory = d.ok ? await d.json() : null; // an older broker has no directory: the Suite tab says so
+    const [sBody, rBody, dBody] = await Promise.all([s.json(), r.json(), d.ok ? d.json() : null]);
+    if (read !== registryRead) return;
+    [services, registry] = [sBody, rBody];
+    directory = dBody; // an older broker has no directory: the Suite tab says so
   } catch (e) {
-    if (!services) fill($("table.services-all tbody"), noRows(7, `Could not read the registry: ${e.message}`));
+    if (read === registryRead && !services) fill($("table.services-all tbody"), noRows(7, `Could not read the registry: ${e.message}`));
     return;
   }
-  // A forgotten node: drop its card and summary.
+  // A forgotten node: drop its card and summary. One heard from since this read began may be newer than it.
   const known = new Set(registry.nodes.map((n) => n.name));
   for (const name of [...nodes.keys()]) {
-    if (known.has(name)) continue;
+    if (known.has(name) || (nodeHeard.get(name) ?? 0) > asOf) continue;
     nodes.delete(name);
+    nodeHeard.delete(name);
     order.splice(order.indexOf(name), 1);
     document.getElementById(`node-${name}`)?.remove();
   }
@@ -706,9 +714,10 @@ document.addEventListener("click", async (e) => {
   }, 2000));
 });
 function renderSnippets() {
-  const origin = new URL(api("")).origin;
+  const { origin, pathname } = api("");
+  const broker = origin + pathname.replace(/\/+$/, ""); // a path prefix is part of the broker's address
   $("#snippet-env").textContent = [
-    `ARGUS_GPU_BROKER_URL=${origin}`,
+    `ARGUS_GPU_BROKER_URL=${broker}`,
     "ARGUS_GPU_BROKER_TOKEN=<the broker's ARGUS_GPU_BROKER_TOKEN>",
     "# only if its manifest has admin_auth residents (usually already set):",
     "ARGUS_ADMIN_TOKEN=<the service's own admin token>",
@@ -716,7 +725,7 @@ function renderSnippets() {
   $("#snippet-agent").textContent = [
     "IRIS_AGENT_NODE=<a short name for this GPU, e.g. jarrah>",
     "IRIS_AGENT_TOKEN=<the broker's IRIS_AGENT_TOKEN>",
-    `IRIS_BROKER_URL=${origin}`,
+    `IRIS_BROKER_URL=${broker}`,
     "IRIS_AGENT_MANAGE_LABEL=1   # optional: allow containers labelled argus.iris.manage=true",
   ].join("\n");
 }
@@ -791,6 +800,7 @@ async function boot() {
     },
     node: (e) => {
       const state = JSON.parse(e.data);
+      nodeHeard.set(state.name, ++nodeEvents);
       if (!order.includes(state.name)) { order.push(state.name); scheduleRegistry(0); }
       const was = nodes.get(state.name);
       nodes.set(state.name, state);
