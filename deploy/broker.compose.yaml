@@ -1,5 +1,4 @@
-# argus-iris broker, on morpheus. `docker compose -f deploy/broker.compose.yaml up -d`
-# (a2f holds :8110 on morpheus, hence 8120.)
+# argus-iris broker, on one host. `docker compose -f deploy/broker.compose.yaml up -d`
 services:
   argus-iris:
     image: ghcr.io/smk762/argus-iris:${IRIS_TAG:-latest}

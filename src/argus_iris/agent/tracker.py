@@ -1,6 +1,6 @@
 """Per-process idle tracking across samples.
 
-A process is busy in a sample when its VRAM changed or it used the GPU. gothmog looked at VRAM alone, which calls a
+A process is busy in a sample when its VRAM changed or it used the GPU. VRAM alone would call a
 busy process with a steady footprint (an Ollama model mid-generation) idle.
 """
 

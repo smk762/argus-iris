@@ -5,7 +5,7 @@ The resident contract is argus-cortex's :class:`~argus_cortex.gpu_wire.ResidentH
 
 Services not yet on the contract are still read, the older shapes best-effort, and logged once as off-contract:
 
-- top level with a non-bool ``busy`` (voluptas's Miso: an object while working, null when idle);
+- top level with a non-bool ``busy`` (Miso: an object while working, null when idle);
 - a ``gpu`` block carrying the state (argus-lens): ``{"gpu": {"loaded", "model_state", "idle_s"}}``.
 
 The VRAM figure itself comes from the agent's per-process view of the service's container, never from here.

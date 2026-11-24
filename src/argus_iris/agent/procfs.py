@@ -67,7 +67,7 @@ def read_host_memory(meminfo: Path) -> HostMemory | None:
 def read_anon_mb(cgroup_root: Path, cgroup_path: str) -> int | None:
     """``anon`` from a cgroup's ``memory.stat``, in MiB.
 
-    Anonymous memory is what ComfyUI's offloaded weights occupy and what only a restart returns (voluptas #16); page
+    Anonymous memory is what ComfyUI's offloaded weights occupy and what only a restart returns; page
     cache is reclaimable and not counted.
     """
     stat = cgroup_root / cgroup_path.lstrip("/") / "memory.stat"

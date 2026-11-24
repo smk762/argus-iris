@@ -1,168 +1,60 @@
 # argus-iris
 
-VRAM-aware GPU lease broker for the Argus suite: priorities, schedules, keepalive and idle-kill across GPU nodes
+[![CI](https://github.com/smk762/argus-iris/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/smk762/argus-iris/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/argus-iris)](https://pypi.org/project/argus-iris/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Status: rollout step 3 (leases and admission). Agents report per-process VRAM, idle time and host RAM; the broker
-composes them with ComfyUI, Ollama and Argus service readings into residents and a per-node ledger, and serves the lease
-API that argus-cortex's `BrokerCoordinator` calls. With `admission: observe` (the default) it grants every lease at once
-and records whether it would have fit; with `admission: enforce` it queues what does not fit, spills to the next node,
-and evicts idle residents to make room. A residency policy (`IRIS_POLICY`, see [deploy/policy.example.yaml](deploy/policy.example.yaml)) adds
-idle-kill, keepalive pins and restarts per resident (step 4); each rule only reports what it would do until it says
-`enforce: true`, so residents are handed over one at a time. See [DESIGN.md](DESIGN.md).
+**A GPU lease broker for a small fleet of mixed cards.** Image generation, LLMs, speech and training jobs share a few
+GPUs, each assuming it owns the card, until one of them runs out of memory. iris decides whether a job may start now,
+on which node, and which idle model must be unloaded first. It never runs the work.
 
-## Run
-
-For the compose files, copy [deploy/.env.example](deploy/.env.example) to `deploy/.env` and fill in the host's
-section. The broker needs `RAG_CHAT_API_KEY` to read agent-composer's residents on dragon.
-
-```bash
-docker compose up -d              # broker + this host's agent (morpheus)
-docker compose up -d iris-agent   # agent only (dragon, jarrah)
-docker compose build              # ghcr.io/smk762/argus-iris:${IRIS_TAG} from this checkout (set IRIS_TAG=local)
+```
+ callers (argus-cortex client)          dashboard          Prometheus
+       │ leases, heartbeats                │ SSE               │
+       ▼                                   ▼                   ▼
+ ┌───────────────────────── broker (:8120) ─────────────────────────┐
+ │  queue and admission · VRAM ledger · residency policy · registry │
+ │  adapters: ComfyUI · Ollama · argus-http · external              │
+ └────────┬──────────────────────┬──────────────────────┬───────────┘
+   agent @ rtx3090        agent @ rtx4060        agent @ gtx1070
+   NVML, cgroups, allow-listed container start/stop/restart
 ```
 
-[compose.yaml](compose.yaml) includes [deploy/broker.compose.yaml](deploy/broker.compose.yaml) and
-[deploy/agent.compose.yaml](deploy/agent.compose.yaml) with `deploy/.env`; each also runs on its own with `-f`.
+## What it does
 
-On each GPU host (see [deploy/agent.compose.yaml](deploy/agent.compose.yaml)):
+- **Reserves VRAM.** With `admission: enforce`, a lease that does not fit is queued, sent to another node that has
+  room, or given room by evicting the least recently used idle models. Priority classes age, so nothing starves.
+- **Checks the GPU, not the service.** An eviction counts only when NVML shows the memory came back. What a service
+  keeps anyway (a CUDA context, an allocator cache) is measured and reported.
+- **Survives clients that don't clean up.** Leases expire without heartbeats. A job that heartbeats but does no GPU
+  work is flagged as stalled and asked to yield.
+- **Fails open.** If the broker is down, the client falls back to its local lease and work continues.
+- **Is adopted gradually.** Admission starts in `observe`, and each residency rule only reports until it says
+  `enforce: true`.
+- **Finds services itself.** Services register with a URL and a token; the node agents' container inventory says where
+  they run. A caller can never name a host for the broker to contact.
 
-```bash
-IRIS_AGENT_NODE=morpheus IRIS_AGENT_TOKEN=... IRIS_AGENT_CONTAINERS=voluptas_comfyui argus-iris agent   # :9110
-```
+## Try it
 
-The agent needs `pid: host`, `cgroup: host`, NVML, the Docker socket and `/sys/fs/cgroup` read-only. Container actions are disabled
-unless `IRIS_AGENT_TOKEN` is set, and apply only to containers in `IRIS_AGENT_CONTAINERS`.
-
-The broker, on morpheus (see [deploy/iris.example.yaml](deploy/iris.example.yaml)):
-
-```bash
-argus-iris serve --config iris.yaml   # :8120 — /nodes, /residents, /leases, /tenants, /events, /metrics, /health
-```
-
-### Adding a service or a GPU host
-
-A service needs two settings: `ARGUS_GPU_BROKER_URL=http://<broker>:8120` and `ARGUS_GPU_BROKER_TOKEN`. With
-argus-cortex 0.15 the client takes the broker coordinator from the URL alone, finds `gpu-tenant.yaml`, registers it at
-startup (`POST /tenants`) and renews it every five minutes. Older clients register with their first lease and also need
-`ARGUS_GPU_COORDINATOR=broker`. Each manifest resident becomes a service once some node's agent reports its container
-(by name, else compose service): the node is that agent's, and `base_url` is that agent's host plus the container's
-published port (the resident's `port` picks one when it publishes several). The caller's own host is never used. A
-resident with `admin_auth` is called with the admin token the client sent (`X-Argus-Admin-Token`, from its
-`ARGUS_ADMIN_TOKEN`), and only that: an operator's `token_env` never goes to a registered host. `iris.yaml` entries win:
-a resident whose container a configured service already reads is left to it. `GET /services` lists every service with
-its origin, and `GET /registry` shows each tenant's residents and where they landed or why not (the dashboard's
-Services view).
-
-Removal needs nothing either. A client signs off on shutdown (`DELETE /tenants/{tenant}`), which only lapses the
-registration: its services stay while their containers exist, because iris may be the one that stopped them, and go
-once an agent reports the container removed. `?purge=true` (the dashboard's Forget) drops it at once. Registrations,
-with their tokens, persist in `$IRIS_STATE_DIR/registrations.json` (mode 0600; the compose file mounts a volume).
-
-For iris to start or restart a registered container, the host's agent must allow it: on `IRIS_AGENT_CONTAINERS`, or,
-where the agent sets `IRIS_AGENT_MANAGE_LABEL=1`, labelled `argus.iris.manage: "true"` in the service's own compose file.
-Neither the broker nor a manifest can widen that.
-
-A new GPU host runs `iris-agent` with `IRIS_AGENT_NODE`, `IRIS_AGENT_TOKEN` and `IRIS_BROKER_URL`. It announces itself
-every minute (`POST /nodes`, authenticated with the agent token) and becomes a node at the address it called from
-(`IRIS_AGENT_URL` overrides that). Configured nodes win on name; `DELETE /nodes/{name}` forgets an announced one.
-`register_services: false` or `register_nodes: false` in `iris.yaml` turns either off.
-
-### Service directory
-
-Any container whose compose file labels it `argus.peer: <name>` (the name callers ask for: `nudenet`, `singguard`,
-`lens`) is listed in iris's service directory, GPU or not. iris finds it in the node agents' inventories and reaches it
-at the agent's host and the published port. The rules match registered residents: the optional `argus.port` label picks
-one when a container publishes several, and a loopback-only bind is reported and not served. Health comes from
-`argus.health` (default `/health`) every 30 s. A body that validates as argus-cortex's `ServiceHealth` is read through
-that model (`health.contract` is true); anything else is read field by field and is up or down by its HTTP status.
-`health.capabilities` is always a list of the names that are on, whether the service sent a list or a map of name to
-boolean (`service_version` 1.1, argus-cortex 0.16.1).
-`peers:` in `iris.yaml` adds URLs for peers outside the agents' view; configured peers come first.
-
-The entries and the lookup reply are argus-cortex's wire models (`argus_cortex.service.DirectoryEntry`, `EntryHealth`,
-`PeerLookup`; `directory_version` 1.0, `service-directory-schema.json`), the ones cortex's `peers` client reads. A peer
-name is lowercase letters, digits and single hyphens (`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`). A container labelled with
-anything else, or with a health path that is not a path, is left out of the directory and logged once
-(`directory_label_refused`); a `peers:` key that is not a peer name fails when the config loads.
-
-- `GET /directory`: every entry, with its URL (or why it has none) and health.
-- `GET /directory/{peer}`: where to reach a peer, best first (healthiest, then node order). Callers use it to find a
-  peer (`argus_cortex.peers.peer_url(..., discover=True)`). It decides where work is sent, so it needs
-  `ARGUS_GPU_BROKER_TOKEN` set on the broker and presented by the caller. A peer with nothing reachable, or a name no
-  peer can have, is a 404.
-- `GET /directory/sd`: Prometheus HTTP service discovery (`http_sd_configs`), one target per reachable service, labelled
-  `argus_peer`, `argus_service`, `node`, `container` and `argus_health_path`.
-
-The dashboard's **Suite** view (`/ui/#suite`) lists them, with any failing checks at the top.
-
-iris is in its own directory: its compose files label the broker `argus.peer: iris` and each host's agent
-`argus.peer: iris-agent`.
-
-### Health
-
-`GET /health` on the broker and on the agent is argus-cortex's `ServiceHealth` (`service`, `version`, `status`,
-`started_at`, `wire`, `checks`, ...) with each one's own fields beside it, unchanged: the broker's `mode`, `polls`,
-`leases`, `agents`, `pins_missing`, `crowded_out` and `registered`; the agent's `node`, `last_poll_age_s`, `nvml_error`,
-`docker_error` and `actions_enabled`. `status` is `degraded` while the broker cannot reach an agent (check `agents`), or
-while the agent has no NVML sample (check `nvml`); both read the last poll, so they are never stale, and the route always
-answers 200. `GET /health?checks=0` skips the checks.
-
-### Suite settings
-
-`argus-iris serve` reads the tokens its config names (`caller_token_env`, `agent_token_env`, each service's
-`token_env`) from the suite file (`argus_cortex.settings`: `~/.config/argus/suite.env`, or `/etc/argus/suite.env` in a
-container) when the environment leaves them unset or blank. The environment wins, nothing else is taken from the file,
-and only the names are printed. `ARGUS_ENV_FILE=off` disables it. The agent does not read the file.
-
-### Leases
-
-Callers take leases with the broker coordinator (above). A service target goes to the configured services that serve it, in config order (`ollama-dragon` before
-`ollama-jarrah`), preferring a node where the model is already loaded and skipping services that are down; the grant
-carries that node and its `base_url`. A service also answers the names in its `serves` list (morpheus's argus-echo
-XTTS has `serves: [xtts]`, so an `xtts` lease that does not fit on dragon goes there). When `ARGUS_GPU_BROKER_TOKEN` is set on the broker, the lease routes require it
-as a bearer token; unset, they are open. `GET /leases` lists what is queued or granted (`?all=true` adds the last ten
-minutes' finished leases).
-
-One manual action exists: bring a service back up. If its health check fails, the node's agent starts its container
-(it must be on that agent's `IRIS_AGENT_CONTAINERS`), and iris waits for it to answer:
+You need Docker with the NVIDIA container runtime, and Compose.
 
 ```bash
-curl -X POST -H "Authorization: Bearer $ARGUS_GPU_BROKER_TOKEN" http://morpheus:8120/services/comfyui/warm
+git clone https://github.com/smk762/argus-iris && cd argus-iris
+cp deploy/.env.example deploy/.env               # set IRIS_AGENT_NODE, IRIS_AGENT_TOKEN and HOST_IP
+cp deploy/iris.example.yaml deploy/iris.yaml     # set your nodes and services
+docker compose build && docker compose up -d     # broker and agent on this host
 ```
 
-It needs `ARGUS_GPU_BROKER_TOKEN` (callers) and `IRIS_AGENT_TOKEN` (matching the agents') set on the broker.
+Open `http://localhost:8120/ui/`. Read [SECURITY.md](SECURITY.md) before exposing either port: the agent holds the
+Docker socket.
 
-The other manual action frees a resident's VRAM through its adapter: Ollama gets `keep_alive: 0` for that model,
-ComfyUI `POST /free`, an argus-http service its `evict_path` (GPU to CPU, kept warm) or else its `unload_path`, and an
-external service (Immich's ML server) has its container stopped, only with `evict_by: stop` (else 422). A busy
-resident is refused with 409; iris then waits until the agent sees the memory come back (`evict_confirm_s`, 30 s) and
-reports what the resident still holds (a CUDA context, say, which only a restart frees):
+Or from PyPI: `pip install 'argus-iris[server,cli]'` for the broker, `pip install 'argus-iris[agent,cli]'` for a node.
 
-```bash
-curl -X POST -H "Authorization: Bearer $ARGUS_GPU_BROKER_TOKEN" \
-  "http://morpheus:8120/residents/dragon/xtts/evict?mode=auto"   # mode: auto | evict | unload
-```
+## Read more
 
-The broker also serves a dashboard at `http://<broker>:8120/ui/` (`/` redirects there). **GPUs** has a card per node
-and then each node in full: VRAM split into
-residents, unattributed, held-back and admissible memory, plus residents with idle times, services with a warm button, residents with an evict button,
-and the node's leases (marked "over" where admission would have refused them). A service is flagged when what the node
-can never free (pins, unmanaged processes, unloaded residues) leaves less room than it needs; `/health` lists those
-under `crowded_out`.
-It updates live from `/events`. **Services** (`/ui/#services`) lists every service with where it came from, how iris
-reaches it and whether its agent will start it, each registered tenant with where its residents landed (or why not),
-and every node, with Forget for registrations and announced nodes. **Connect** (`/ui/#connect`) has the settings to copy
-for a new service or GPU host. To warm, evict or forget from the page, enter `ARGUS_GPU_BROKER_TOKEN` under "Broker
-token". It is kept in that tab's session storage only.
-
-Part of the [Argus suite](https://github.com/smk762?tab=repositories&q=argus).
-
-## Install
-
-```bash
-uv pip install 'argus-iris[server]'   # broker
-uv pip install 'argus-iris[agent]'    # node agent
-```
+- [DESIGN.md](DESIGN.md): the problem, admission, scheduling and eviction, and what is built or still planned.
+- [docs/operating.md](docs/operating.md): deployment, adding services and GPU hosts, leases, the service directory.
+- [SECURITY.md](SECURITY.md): what each port can do, and how it is guarded.
 
 ## Develop
 
@@ -172,11 +64,8 @@ make test
 make lint
 ```
 
-## CI / Release
+The version comes from git tags (`hatch-vcs`). CI and release use the shared
+[argus-ci](https://github.com/smk762/argus-ci) workflows; a `v*` tag publishes to PyPI and GHCR.
 
-- **CI** runs via the shared [`argus-ci`](https://github.com/smk762/argus-ci) reusable workflow.
-- **Release** publishes to PyPI (OIDC trusted publishing) and GHCR on `v*` tags.
-- Versioning is derived from git tags via `hatch-vcs` — tag `vX.Y.Z` to cut a release.
-
-This repo was scaffolded from [`argus-pkg-template`](https://github.com/smk762/argus-pkg-template).
-Run `copier update` to pull template changes (CI, release, tooling).
+iris is part of the [Argus suite](https://github.com/smk762?tab=repositories&q=argus). The client and wire models live in
+[argus-cortex](https://github.com/smk762/argus-cortex).

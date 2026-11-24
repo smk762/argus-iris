@@ -25,14 +25,14 @@ def test_serve_reads_only_its_token_names_from_the_suite_file(tmp_path, monkeypa
     config.write_text(
         f"""
 nodes:
-  morpheus: {{agent_url: "http://192.168.1.39:9110"}}
+  rtx3090: {{agent_url: "http://192.0.2.10:9110"}}
 caller_token_env: {CALLER}
 agent_token_env: {AGENT}
 services:
   - id: lens
-    node: morpheus
+    node: rtx3090
     adapter: argus-http
-    base_url: http://192.168.1.39:8100
+    base_url: http://192.0.2.10:8100
     token_env: {SERVICE}
 """
     )

@@ -8,7 +8,7 @@ Guidance for AI agents working in this repo. Human-facing usage lives in [README
 
 VRAM-aware GPU lease broker for the Argus suite: priorities, schedules, keepalive and idle-kill across GPU nodes
 
-It decides whether a GPU job may start now, on which node (morpheus, dragon, jarrah), and what must be unloaded first. It does not run the work. **[DESIGN.md](DESIGN.md) is the plan the first releases build to; read it before changing anything.** The client (`BrokerCoordinator`) and the lease and tenant-manifest wire models live in argus-cortex's `gpu` module, so callers and broker share one definition.
+It decides whether a GPU job may start now, on which node, and what must be unloaded first. It does not run the work. **[DESIGN.md](DESIGN.md) is the plan the first releases build to; read it before changing anything.** The client (`BrokerCoordinator`) and the lease and tenant-manifest wire models live in argus-cortex's `gpu` module, so callers and broker share one definition.
 
 ## Argus suite
 <!-- argus-suite: keep this block; argus-ci checks for it -->
@@ -108,7 +108,7 @@ Run one test: `uv run --no-sync pytest tests/test_x.py::test_name -q`.
 - **`src/` layout, `py.typed`, Pydantic v2, `structlog`.** Ruff line-length 120; keep it clean (`make lint`) before committing.
 - **Any endpoint that does something is a boundary.** There's no auth by default — treat reaching the port as host access. Gate state-changing routes behind the shared read-only / origin guards, and fence any caller-supplied path under a configured root.
 - Wire schemas (if any) are checked in and verified in CI — regenerate and commit when the types change, don't let the committed copy drift.
-- **Ports:** a2f holds :8110 on morpheus, so the broker is :8120; the agent is :9110 (gothmog's exporter used :9101).
+- **Ports:** the broker is :8120 (argus-mask's a2f holds :8110); the agent is :9110.
 - **The agent is root-equivalent** (Docker socket, `pid: host`). Container actions stay behind `IRIS_AGENT_TOKEN`
   **and** the agent's own `IRIS_AGENT_CONTAINERS` allowlist (or, opted in per host, the `argus.iris.manage` label set
   in that host's compose files); never let broker config or a POSTed manifest widen it.

@@ -184,7 +184,7 @@ class NodeLedger(BaseModel):
     unattributed_mb: int  # NVML used minus resident_mb: other users, CUDA contexts, the display
     admissible_mb: int  # what a new lease could get without evicting anything
     pinned_mb: int = 0  # held by pinned residents, a dropped pin awaiting restore included
-    # What admission can never free (#40): pinned_mb, processes with no adapter (Frigate), externals iris may not stop,
+    # What admission can never free (#40): pinned_mb, processes with no adapter (an NVR), externals iris may not stop,
     # and the context an unloaded service keeps (only a restart returns it).
     held_mb: int = 0
     room_mb: int | None = None  # total - reserve - headroom - held_mb: the most any other service can get

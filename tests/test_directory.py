@@ -17,8 +17,8 @@ from argus_iris.server.app import create_app
 CALLER = "caller-token"
 CONFIG = {
     "nodes": {
-        "morpheus": {"agent_url": "http://192.168.1.39:9110"},
-        "dragon": {"agent_url": "http://192.168.1.198:9110"},
+        "rtx3090": {"agent_url": "http://192.0.2.10:9110"},
+        "rtx4060": {"agent_url": "http://192.0.2.11:9110"},
     },
 }
 
@@ -34,7 +34,7 @@ def c(name: str, *ports: tuple[int, int | None], labels: dict | None = None, run
 
 
 INVENTORIES = {
-    "morpheus": [
+    "rtx3090": [
         c("argus-retina-nudenet-1", (8080, 8130), labels={"argus.peer": "nudenet", "argus.service": "argus-retina"}),
         c("argus-retina-singguard-1", (8080, 8134), labels={"argus.peer": "singguard"}),
         c("unlabelled", (5432, 5432)),
@@ -46,7 +46,7 @@ INVENTORIES = {
             labels={"argus.peer": "lens", "argus.port": "8100", "argus.health": "healthz"},
         ),
     ],
-    "dragon": [
+    "rtx4060": [
         c("argus-retina-nudenet-1", (8080, 8130), labels={"argus.peer": "nudenet"}),
         c("stopped", (8080, 8150), labels={"argus.peer": "ocr"}, running=False),
     ],
@@ -64,20 +64,20 @@ def test_labelled_containers_become_entries_with_agent_host_urls() -> None:
     d = directory()
     rows = {(e.node, e.peer): e for e in d.entries}
     assert set(rows) == {
-        ("morpheus", "nudenet"),
-        ("morpheus", "singguard"),
-        ("morpheus", "a2f"),
-        ("morpheus", "lens"),
-        ("dragon", "nudenet"),
-        ("dragon", "ocr"),
+        ("rtx3090", "nudenet"),
+        ("rtx3090", "singguard"),
+        ("rtx3090", "a2f"),
+        ("rtx3090", "lens"),
+        ("rtx4060", "nudenet"),
+        ("rtx4060", "ocr"),
     }  # the unlabelled container is not in the directory
-    assert rows["morpheus", "nudenet"].url == "http://192.168.1.39:8130"  # the published port, the agent's host
-    assert rows["morpheus", "nudenet"].service == "argus-retina"
-    a2f = rows["morpheus", "a2f"]
+    assert rows["rtx3090", "nudenet"].url == "http://192.0.2.10:8130"  # the published port, the agent's host
+    assert rows["rtx3090", "nudenet"].service == "argus-retina"
+    a2f = rows["rtx3090", "a2f"]
     assert a2f.url is None and "127.0.0.1 only" in a2f.reason  # reported, never served
-    lens = rows["morpheus", "lens"]
-    assert lens.url == "http://192.168.1.39:8100" and lens.health_path == "/healthz"  # argus.port picks; path fixed up
-    assert not rows["dragon", "ocr"].running
+    lens = rows["rtx3090", "lens"]
+    assert lens.url == "http://192.0.2.10:8100" and lens.health_path == "/healthz"  # argus.port picks; path fixed up
+    assert not rows["rtx4060", "ocr"].running
 
 
 def test_config_peers_win_and_are_validated() -> None:
@@ -171,13 +171,13 @@ def test_capabilities_as_a_map_list_only_the_names_that_are_on() -> None:
 
 def test_a_container_with_a_refused_label_is_skipped_and_logged_once() -> None:
     bad = {
-        "morpheus": [
-            *INVENTORIES["morpheus"],
+        "rtx3090": [
+            *INVENTORIES["rtx3090"],
             c("shouty", (8080, 8200), labels={"argus.peer": "NudeNet"}),
             c("spaced", (8080, 8201), labels={"argus.peer": "ok-name", "argus.health": "/health check"}),
             c("slashed", (8080, 8202), labels={"argus.peer": "../etc"}),
         ],
-        "dragon": INVENTORIES["dragon"],
+        "rtx4060": INVENTORIES["rtx4060"],
     }
     d = directory()
     with structlog.testing.capture_logs() as logs:
@@ -203,7 +203,7 @@ def test_a_configured_peer_needs_a_peer_name() -> None:
 
 async def test_probe_and_lookup_order() -> None:
     def svc(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "192.168.1.39":
+        if request.url.host == "192.0.2.10":
             return httpx.Response(503, json={"status": "starting"})
         return httpx.Response(200, json={"service": "argus-retina", "version": "0.3.0", "status": "ok"})
 
@@ -211,21 +211,21 @@ async def test_probe_and_lookup_order() -> None:
     d._client = httpx.AsyncClient(transport=httpx.MockTransport(svc))
     await d.probe()
     found = d.lookup("nudenet")
-    # dragon's is healthy, morpheus's still starting: healthiest first, whatever the node order.
-    assert [e.node for e in found.urls] == ["dragon", "morpheus"]
+    # rtx4060's is healthy, rtx3090's still starting: healthiest first, whatever the node order.
+    assert [e.node for e in found.urls] == ["rtx4060", "rtx3090"]
     assert found.urls[0].health.version == "0.3.0"
     assert d.lookup("ocr").urls == ()  # stopped
     assert d.lookup("a2f").urls == ()  # loopback only
     # Health survives a rebuild (the next poll's inventories) as long as the entry does.
     d.rebuild(INVENTORIES)
-    assert next(e for e in d.entries if e.node == "dragon" and e.peer == "nudenet").health.status == "ok"
+    assert next(e for e in d.entries if e.node == "rtx4060" and e.peer == "nudenet").health.status == "ok"
 
 
 def test_service_discovery_targets() -> None:
     groups = {g["labels"]["argus_peer"] + "@" + g["labels"].get("node", ""): g for g in directory().service_discovery()}
-    assert set(groups) == {"nudenet@morpheus", "singguard@morpheus", "lens@morpheus", "nudenet@dragon"}
-    g = groups["lens@morpheus"]
-    assert g["targets"] == ["192.168.1.39:8100"] and g["labels"]["argus_health_path"] == "/healthz"
+    assert set(groups) == {"nudenet@rtx3090", "singguard@rtx3090", "lens@rtx3090", "nudenet@rtx4060"}
+    g = groups["lens@rtx3090"]
+    assert g["targets"] == ["192.0.2.10:8100"] and g["labels"]["argus_health_path"] == "/healthz"
 
 
 def test_routes(monkeypatch) -> None:
@@ -241,7 +241,7 @@ def test_routes(monkeypatch) -> None:
         assert client.get("/directory/nudenet").status_code == 401
         auth = {"Authorization": f"Bearer {CALLER}"}
         r = client.get("/directory/nudenet", headers=auth)
-        assert r.status_code == 200 and [u["node"] for u in r.json()["urls"]] == ["morpheus", "dragon"]
+        assert r.status_code == 200 and [u["node"] for u in r.json()["urls"]] == ["rtx3090", "rtx4060"]
         assert client.get("/directory/nobody", headers=auth).status_code == 404
         assert client.get("/directory/Not_A_Name", headers=auth).status_code == 404  # not found, never a 500
 
@@ -303,19 +303,17 @@ async def test_the_wire_is_cortexs_models_with_the_fields_iris_served_before(mon
         assert set(entry) == ENTRY_FIELDS
         DirectoryEntry.model_validate(entry)
     first = reply["urls"][0]
-    assert (
-        first["origin"] == "label" and first["url"] == "http://192.168.1.39:8130" and first["health_path"] == "/health"
-    )
+    assert first["origin"] == "label" and first["url"] == "http://192.0.2.10:8130" and first["health_path"] == "/health"
     assert set(first["health"]) == HEALTH_FIELDS
     assert first["health"]["capabilities"] == ["nudity"] and first["health"]["contract"] is True  # a JSON array still
     assert first["health"]["checks"]["model"]["ok"] is True
     # What cortex's client does with it: the first entry for the peer with an absolute http(s) URL.
     parsed = PeerLookup.model_validate(reply)
-    assert parsed.peer == "nudenet" and parsed.urls[0].url == "http://192.168.1.39:8130"
+    assert parsed.peer == "nudenet" and parsed.urls[0].url == "http://192.0.2.10:8130"
     # A stopped entry has no health; an unlabelled service still gets its name from what its health says.
     rows = {(e["node"], e["peer"]): e for e in listing}
-    assert rows["dragon", "ocr"]["health"] is None
-    assert rows["morpheus", "singguard"]["service"] == "argus-retina"
+    assert rows["rtx4060", "ocr"]["health"] is None
+    assert rows["rtx3090", "singguard"]["service"] == "argus-retina"
 
 
 async def test_only_due_entries_are_probed() -> None:
@@ -365,11 +363,11 @@ async def test_the_broker_probes_itself_on_loopback(tmp_path) -> None:
         httpx.AsyncClient(transport=httpx.MockTransport(svc)),
         self_id=me.id[:12],  # the hostname fallback: a short id
     )
-    d.rebuild({"morpheus": [me, INVENTORIES["morpheus"][0]]})
+    d.rebuild({"rtx3090": [me, INVENTORIES["rtx3090"][0]]})
     await d.probe()
-    assert sorted(seen) == ["127.0.0.1:8120", "192.168.1.39:8130"]
+    assert sorted(seen) == ["127.0.0.1:8120", "192.0.2.10:8130"]
     iris = next(e for e in d.entries if e.peer == "iris")
-    assert iris.url == "http://192.168.1.39:8121" and iris.health.status == "ok"
+    assert iris.url == "http://192.0.2.10:8121" and iris.health.status == "ok"
 
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text(f"1 2 0:1 /var/lib/docker/containers/{me.id}/hostname /etc/hostname rw - ext4 x rw\n")
@@ -382,7 +380,7 @@ async def test_one_malformed_health_path_does_not_stop_the_round() -> None:
         httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"status": "ok"}))),
     )
     bad = c("bad", (80, 8200), labels={"argus.peer": "bad", "argus.health": "/a\x01b"})
-    d.rebuild({"morpheus": [bad, *INVENTORIES["morpheus"]]})
+    d.rebuild({"rtx3090": [bad, *INVENTORIES["rtx3090"]]})
     await d.probe()
     health = {e.peer: e.health for e in d.entries}
     assert health["bad"].status == "down" and "InvalidURL" in health["bad"].error
@@ -391,8 +389,8 @@ async def test_one_malformed_health_path_does_not_stop_the_round() -> None:
 
 async def test_a_rebuild_during_a_probe_drops_results_that_no_longer_apply() -> None:
     d = directory()
-    here = {"morpheus": [c("argus-retina-nudenet-1", (8080, 8130), labels={"argus.peer": "nudenet"})]}
-    moved = {"morpheus": [c("argus-retina-nudenet-1", (8080, 8999), labels={"argus.peer": "nudenet"})]}
+    here = {"rtx3090": [c("argus-retina-nudenet-1", (8080, 8130), labels={"argus.peer": "nudenet"})]}
+    moved = {"rtx3090": [c("argus-retina-nudenet-1", (8080, 8999), labels={"argus.peer": "nudenet"})]}
 
     async def probe_then(after: dict) -> None:
         def svc(request: httpx.Request) -> httpx.Response:

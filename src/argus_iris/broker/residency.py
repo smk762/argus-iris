@@ -20,7 +20,7 @@ are handed over one at a time (#6).
   which only restarts containers on its own allowlist.
 - **Host RAM** (``restart_host_ram_mb``, else the tenant manifest's ``host_ram_restart_mb``): a resident whose
   container's anonymous memory is above it, and which has been idle ``restart_host_ram_idle`` (120 s), is restarted
-  the same way. ComfyUI keeps offloaded weights in host RAM and only a restart returns them (voluptas#16). A restart
+  the same way. ComfyUI keeps offloaded weights in host RAM and only a restart returns them. A restart
   throws away whatever the service has loaded, so never while pinned, busy or under a lease.
 - **Restore** (#35): a pin only stops iris evicting a resident; anything else can still drop it (an unload by hand,
   a restart, an OOM, Ollama loading another model over it). iris remembers each pinned resident it has seen loaded

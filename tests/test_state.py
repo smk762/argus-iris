@@ -10,8 +10,8 @@ from argus_iris.broker.state import _service_residents
 
 def test_a_busy_ollama_marks_every_model_busy() -> None:
     svc = ServiceConfig.model_validate(
-        {"id": "ollama", "node": "dragon", "adapter": "ollama", "base_url": "http://dragon:11434"}
+        {"id": "ollama", "node": "rtx4060", "adapter": "ollama", "base_url": "http://rtx4060:11434"}
     )
     reading = ServiceReading(up=True, busy=True, models=[ModelReading("a:1", 1000), ModelReading("b:2", 500)])
-    residents = _service_residents("dragon", svc, reading, [])
+    residents = _service_residents("rtx4060", svc, reading, [])
     assert [(r.model, r.busy, r.idle_s) for r in residents] == [("a:1", True, None), ("b:2", True, None)]

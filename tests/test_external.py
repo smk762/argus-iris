@@ -20,22 +20,22 @@ from argus_iris.models import GpuInfo, GpuProcess, NodeLedger, NodeSnapshot, Nod
 T0 = datetime(2026, 11, 20, tzinfo=UTC)
 IMMICH = {
     "id": "immich-ml",
-    "node": "dragon",
+    "node": "rtx4060",
     "adapter": "external",
-    "base_url": "http://dragon:3003",
+    "base_url": "http://rtx4060:3003",
     "health_path": "/ping",
     "container": "immich_machine_learning",
 }
-ENFORCED = Policy.model_validate({"residents": [{"match": {"resident": "dragon/immich-ml"}, "enforce": True}]})
+ENFORCED = Policy.model_validate({"residents": [{"match": {"resident": "rtx4060/immich-ml"}, "enforce": True}]})
 
 
 def cfg(**svc) -> BrokerConfig:
     return BrokerConfig.model_validate(
         {
-            "nodes": {"dragon": {"agent_url": "http://dragon:9110"}},
+            "nodes": {"rtx4060": {"agent_url": "http://rtx4060:9110"}},
             "services": [
                 IMMICH | svc,
-                {"id": "ollama", "node": "dragon", "adapter": "ollama", "base_url": "http://dragon:11434"},
+                {"id": "ollama", "node": "rtx4060", "adapter": "ollama", "base_url": "http://rtx4060:11434"},
             ],
             "admission": "enforce",
             "evict_confirm_s": 0.2,
@@ -44,7 +44,7 @@ def cfg(**svc) -> BrokerConfig:
 
 
 class World:
-    """dragon running immich_machine_learning (380 MB: CUDA context and the CLIP text model). A stop takes the
+    """rtx4060 running immich_machine_learning (380 MB: CUDA context and the CLIP text model). A stop takes the
     process off the GPU and /ping down with it; a start brings both back."""
 
     def __init__(self) -> None:
@@ -55,11 +55,11 @@ class World:
         url = str(request.url)
         if request.method == "POST":
             self.calls.append(url)
-        if url.startswith("http://dragon:9110/containers/"):
+        if url.startswith("http://rtx4060:9110/containers/"):
             name, action = url.split("/")[-2:]
             self.running = action != "stop"
             return httpx.Response(200, json={"container": name, "action": action, "ok": True})
-        if url == "http://dragon:9110/snapshot":
+        if url == "http://rtx4060:9110/snapshot":
             procs = [
                 GpuProcess(
                     pid=7,
@@ -74,14 +74,14 @@ class World:
             procs = procs if self.running else []
             used = sum(p.vram_mb for p in procs)
             snap = NodeSnapshot(
-                node="dragon",
+                node="rtx4060",
                 taken_at=T0,
                 agent_version="t",
                 gpus=[GpuInfo(index=0, name="g", uuid="d", total_mb=8192, free_mb=8192 - used, used_mb=used)],
                 processes=procs,
             )
             return httpx.Response(200, json=snap.model_dump(mode="json"))
-        if url == "http://dragon:3003/ping" and self.running:
+        if url == "http://rtx4060:3003/ping" and self.running:
             return httpx.Response(200, text="pong")
         raise httpx.ConnectError(f"refused {url}")
 
@@ -102,22 +102,22 @@ def test_evict_by_needs_an_external_service_with_a_container():
 
 async def test_health_and_vram_are_attributed_to_the_service():
     world, broker = await broker_for(cfg())
-    state = broker.nodes["dragon"]
+    state = broker.nodes["rtx4060"]
     assert state.services[0].up is True
     (r,) = state.residents
-    assert (r.id, r.source, r.vram_mb, r.idle_s) == ("dragon/immich-ml", ResidentSource.EXTERNAL, 380, 900)
+    assert (r.id, r.source, r.vram_mb, r.idle_s) == ("rtx4060/immich-ml", ResidentSource.EXTERNAL, 380, 900)
     assert state.ledger.unattributed_mb == 0
 
     world.running = False
     await broker.poll_once()
-    assert broker.nodes["dragon"].services[0].up is False
-    assert broker.nodes["dragon"].residents == []
+    assert broker.nodes["rtx4060"].services[0].up is False
+    assert broker.nodes["rtx4060"].residents == []
 
 
 async def test_evict_is_refused_without_evict_by():
     world, broker = await broker_for(cfg())
     with pytest.raises(ActionError, match="cannot free it through an adapter") as err:
-        await evict_resident(broker, "dragon/immich-ml")
+        await evict_resident(broker, "rtx4060/immich-ml")
     assert err.value.status == 422 and world.calls == []
 
 
@@ -125,26 +125,28 @@ async def test_evict_by_stop_stops_the_container_and_confirms_on_nvml(monkeypatc
     monkeypatch.setenv("IRIS_AGENT_TOKEN", "t")
     world, broker = await broker_for(cfg(evict_by="stop"))
     with pytest.raises(ActionError) as err:
-        await evict_resident(broker, "dragon/immich-ml", mode="evict")  # no CPU stage
+        await evict_resident(broker, "rtx4060/immich-ml", mode="evict")  # no CPU stage
     assert err.value.status == 422
 
-    result = await evict_resident(broker, "dragon/immich-ml", poll_s=0.01)
-    assert world.calls == ["http://dragon:9110/containers/immich_machine_learning/stop"]
+    result = await evict_resident(broker, "rtx4060/immich-ml", poll_s=0.01)
+    assert world.calls == ["http://rtx4060:9110/containers/immich_machine_learning/stop"]
     assert (result.action, result.confirmed, result.before_mb, result.after_mb) == ("stop", True, 380, 0)
     assert broker.stopped == {}  # a manual stop is not warmed again by residency
 
 
 async def test_residency_view_says_what_admission_would_do():
-    r = Resident(id="dragon/immich-ml", node="dragon", service="immich-ml", source="external", vram_mb=380, idle_s=900)
+    r = Resident(
+        id="rtx4060/immich-ml", node="rtx4060", service="immich-ml", source="external", vram_mb=380, idle_s=900
+    )
 
     async def view(policy: Policy, **svc):
         _, broker = await broker_for(cfg(**svc), policy)
         return broker.residency.view(r, T0)
 
-    report = Policy.model_validate({"residents": [{"match": {"resident": "dragon/immich-ml"}}]})
+    report = Policy.model_validate({"residents": [{"match": {"resident": "rtx4060/immich-ml"}}]})
     assert (await view(report, evict_by="stop")).note == "would stop for a lease"
     assert (await view(ENFORCED, evict_by="stop")).note == "stopped when a lease needs the room"
-    killing = Policy.model_validate({"residents": [{"match": {"resident": "dragon/immich-ml"}, "idle_kill": 60}]})
+    killing = Policy.model_validate({"residents": [{"match": {"resident": "rtx4060/immich-ml"}, "idle_kill": 60}]})
     assert (await view(killing)).note == "due, but iris has no adapter for it"
     assert (await view(killing, evict_by="stop")).next == "evict"
 
@@ -152,7 +154,7 @@ async def test_residency_view_says_what_admission_would_do():
 # --- admission -----------------------------------------------------------------------------------------------------
 
 
-def dragon(admissible: int, residents: list[Resident]) -> NodeState:
+def rtx4060(admissible: int, residents: list[Resident]) -> NodeState:
     ledger = NodeLedger(
         total_mb=8192,
         free_mb=admissible + 512,
@@ -163,15 +165,15 @@ def dragon(admissible: int, residents: list[Resident]) -> NodeState:
         admissible_mb=admissible,
     )
     gpu = GpuInfo(index=0, name="g", uuid="d", total_mb=8192, free_mb=admissible + 512, used_mb=0)
-    return NodeState(name="dragon", agent_url="", reachable=True, gpu=gpu, ledger=ledger, residents=residents)
+    return NodeState(name="rtx4060", agent_url="", reachable=True, gpu=gpu, ledger=ledger, residents=residents)
 
 
 def book_for(config: BrokerConfig, policy: Policy) -> tuple[LeaseBook, list]:
     immich = Resident(
-        id="dragon/immich-ml", node="dragon", service="immich-ml", source="external", vram_mb=1500, idle_s=900
+        id="rtx4060/immich-ml", node="rtx4060", service="immich-ml", source="external", vram_mb=1500, idle_s=900
     )
     evicted: list = []
-    nodes = {"dragon": dragon(1000, [immich])}
+    nodes = {"rtx4060": rtx4060(1000, [immich])}
     book = LeaseBook(config, lambda: nodes, clock=lambda: T0, evict=lambda lid, ids: evicted.append(ids), policy=policy)
     return book, evicted
 
@@ -188,7 +190,7 @@ def test_admission_stops_it_only_when_allowed(svc, policy, stops):
     book, evicted = book_for(cfg(**svc), policy)
     rec = book.request(LeaseRequest(tenant="t", target="ollama:qwen3:8b", vram_mb=2000, wait_s=20))
     assert rec.state == "queued"
-    assert evicted == ([["dragon/immich-ml"]] if stops else [])
+    assert evicted == ([["rtx4060/immich-ml"]] if stops else [])
 
 
 # --- warmed again ----------------------------------------------------------------------------------------------------
@@ -201,16 +203,16 @@ async def test_admission_stop_is_warmed_again_once_no_lease_is_active(monkeypatc
 
     monkeypatch.setattr(broker.leases, "evictions_done", lambda *a: None)
     broker.leases.leases["L1"] = type("Queued", (), {"state": "queued"})()  # _evict_for checks it is still waiting
-    await broker._evict_for("L1", ["dragon/immich-ml"])
+    await broker._evict_for("L1", ["rtx4060/immich-ml"])
     assert broker.stopped == {"immich-ml": "L1"} and not world.running
 
     monkeypatch.setattr(broker.leases, "active", lambda node=None: ["a lease"])
     await broker.residency._rewarm(T0)
-    assert not world.running  # a lease is still on dragon
+    assert not world.running  # a lease is still on rtx4060
 
     monkeypatch.setattr(broker.leases, "active", lambda node=None: [])
     broker.residency._cooldown.clear()
     await broker.residency._rewarm(T0)
     assert world.running and broker.stopped == {}
-    assert world.calls[-1] == "http://dragon:9110/containers/immich_machine_learning/start"
-    assert broker.residency.actions[("dragon", "rewarm", "ok")] == 1
+    assert world.calls[-1] == "http://rtx4060:9110/containers/immich_machine_learning/start"
+    assert broker.residency.actions[("rtx4060", "rewarm", "ok")] == 1

@@ -127,7 +127,7 @@ class Agent:
             self._sampler.close()
 
     async def _container(self, cid: str) -> ContainerInfo | None:
-        # One Docker lookup per new container ID, cached; gothmog ran `docker top` on every container per new PID.
+        # One Docker lookup per new container ID, cached, rather than `docker top` on every container per new PID.
         if cid not in self._containers:
             try:
                 self._containers[cid] = await self.docker.inspect(cid)

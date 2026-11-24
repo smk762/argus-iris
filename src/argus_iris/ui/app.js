@@ -723,7 +723,7 @@ function renderSnippets() {
     "ARGUS_ADMIN_TOKEN=<the service's own admin token>",
   ].join("\n");
   $("#snippet-agent").textContent = [
-    "IRIS_AGENT_NODE=<a short name for this GPU, e.g. jarrah>",
+    "IRIS_AGENT_NODE=<a short name for this GPU, e.g. gtx1070>",
     "IRIS_AGENT_TOKEN=<the broker's IRIS_AGENT_TOKEN>",
     `IRIS_BROKER_URL=${broker}`,
     "IRIS_AGENT_MANAGE_LABEL=1   # optional: allow containers labelled argus.iris.manage=true",

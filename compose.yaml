@@ -2,8 +2,8 @@
 # The services are defined once, in deploy/; this file includes them with deploy/.env.
 #
 #   cp deploy/.env.example deploy/.env            # then edit; see the comments there
-#   docker compose up -d                          # broker + agent (morpheus)
-#   docker compose up -d iris-agent               # agent only (dragon, jarrah)
+#   docker compose up -d                          # broker + agent (the broker host)
+#   docker compose up -d iris-agent               # agent only (every other GPU host)
 #   docker compose build                          # ghcr.io/smk762/argus-iris:${IRIS_TAG}, from this checkout
 #
 # deploy/broker.compose.yaml and deploy/agent.compose.yaml still work on their own with -f.

@@ -1,102 +1,54 @@
-# argus-iris broker config (observe-only release). Point IRIS_CONFIG at a copy of this file.
-# Hostnames are examples; use whatever resolves on your LAN. The broker container does not see the host's
-# /etc/hosts, so names that resolve only there will fail: use IPs (or DNS) in deploy/iris.yaml (gitignored).
+# argus-iris broker config: an example with three GPU nodes named after their cards. Point IRIS_CONFIG at a copy.
+# The broker container does not see the host's /etc/hosts: use names your DNS resolves, or IPs.
 poll_s: 5
 agent_timeout_s: 3
 
 nodes:
-  morpheus:
-    agent_url: http://morpheus:9110
-    reserve_mb: 3500        # desktop display: never handed out
-  dragon:
-    agent_url: http://dragon:9110
-  jarrah:
-    agent_url: http://jarrah:9110
+  rtx3090:
+    agent_url: http://rtx3090:9110
+    reserve_mb: 3500        # a desktop display: never handed out
+  rtx4060:
+    agent_url: http://rtx4060:9110
+  gtx1070:
+    agent_url: http://gtx1070:9110
 
 # Services that hold residents. `container` matches the agent's GPU processes to the service; without it the
 # service's VRAM shows up as an unclaimed "process" resident instead. A lease target names a service by its id, its
 # adapter, or a name in its `serves` list. `warm_mb` (else the most iris has seen it hold) is what it needs: iris flags
 # it `crowded_out` when what the node can never free (pins, unmanaged processes, unloaded residues) leaves less.
 services:
-  - id: comfyui
-    node: morpheus
-    adapter: comfyui
-    base_url: http://morpheus:8188
-    container: voluptas_comfyui
-  # agent-composer binds Ollama to 127.0.0.1 unless OLLAMA_BIND_IP is set; the broker needs it on the LAN.
-  - id: ollama-dragon
-    node: dragon
-    adapter: ollama
-    base_url: http://dragon:11434
-    container: ollama
-  - id: ollama-jarrah
-    node: jarrah
-    adapter: ollama
-    base_url: http://jarrah:11434
-    container: mithrandir-ollama   # jarrah's Ollama runs in mithrandir's (Immich) compose project
-  # voluptas (smk762/voluptas#22): /health carries model_state, busy, idle_s; /admin/unload and /admin/wake.
-  - id: image-gen-diffusers
-    node: morpheus
-    adapter: argus-http
-    base_url: http://morpheus:8011
-    container: voluptas_image_gen_diffusers
-    warm_path: /admin/wake
-    token_env: ARGUS_ADMIN_TOKEN      # guards /admin/* when set; reads stay open
-  - id: miso
-    node: morpheus
-    adapter: argus-http
-    base_url: http://morpheus:8034
-    container: voluptas_miso
-    warm_path: /admin/wake
-    token_env: ARGUS_ADMIN_TOKEN      # voluptas#35: miso's /admin/* honours it (admin_auth: true)
+  - { id: comfyui, node: rtx3090, adapter: comfyui, base_url: "http://rtx3090:8188", container: comfyui }
 
-  # agent-composer (smk762/agent-composer#44): the sidecars listen on loopback, so iris reaches them through
-  # rag-chat's resident gateway, which needs an API key as Bearer even for reads. Each sidecar's /health has a
-  # `gpu` block (loaded, model_state, idle_s). xtts, tts and modernbert also have /admin/evict (GPU -> CPU).
-  - { id: xtts, node: dragon, adapter: argus-http, container: xtts, warm_path: /admin/wake, evict_path: /admin/evict,
-      base_url: "http://dragon:9150/api/runtime/residents/xtts", token_env: RAG_CHAT_API_KEY }
-  - { id: tts, node: dragon, adapter: argus-http, container: tts, warm_path: /admin/wake, evict_path: /admin/evict,
-      base_url: "http://dragon:9150/api/runtime/residents/tts", token_env: RAG_CHAT_API_KEY }
-  - { id: whisper, node: dragon, adapter: argus-http, container: whisper, warm_path: /admin/wake,
-      base_url: "http://dragon:9150/api/runtime/residents/whisper", token_env: RAG_CHAT_API_KEY }
-  - { id: modernbert, node: dragon, adapter: argus-http, container: modernbert, warm_path: /admin/wake, evict_path: /admin/evict,
-      base_url: "http://dragon:9150/api/runtime/residents/modernbert", token_env: RAG_CHAT_API_KEY }
-  - { id: infinity, node: dragon, adapter: argus-http, container: infinity, warm_path: /admin/wake,
-      base_url: "http://dragon:9150/api/runtime/residents/infinity", token_env: RAG_CHAT_API_KEY }
+  # Two Ollamas: placement prefers the one with the model loaded, then config order. The broker must reach them, so
+  # bind them to a LAN address, not 127.0.0.1.
+  - { id: ollama-rtx4060, node: rtx4060, adapter: ollama, base_url: "http://rtx4060:11434", container: ollama }
+  - { id: ollama-gtx1070, node: gtx1070, adapter: ollama, base_url: "http://gtx1070:11434", container: ollama }
 
-  # argus-echo replacing agent-composer's voice-stack on dragon: point the same ids straight at echo's engines (no
-  # rag-chat gateway), so policy rules (dragon/tts, dragon/xtts) and lease targets carry over. Run echo there with
-  # ECHO_BIND=<dragon's LAN address>, ARGUS_ADMIN_TOKEN = the broker's ECHO_ADMIN_TOKEN, and, where a policy rule
-  # enforces idle-kill, QWEN_/XTTS_KEEP_ALIVE_GPU=-1 (iris owns the timers; unload_after replaces the CPU stage).
-  # Add argus-echo-qwen and argus-echo-xtts to dragon's IRIS_AGENT_CONTAINERS for restart_residual_mb.
-  # - { id: tts, node: dragon, adapter: argus-http, base_url: "http://dragon:8142", container: argus-echo-qwen,
-  #     warm_path: /admin/wake, evict_path: /admin/evict, token_env: ECHO_ADMIN_TOKEN }
-  # - { id: xtts, node: dragon, adapter: argus-http, base_url: "http://dragon:8141", container: argus-echo-xtts,
-  #     warm_path: /admin/wake, evict_path: /admin/evict, token_env: ECHO_ADMIN_TOKEN }
+  # argus-http: any service with the resident contract. /health carries model_state, busy and idle_s; the paths below
+  # are its lifecycle routes; token_env names the variable holding its admin token (reads stay open).
+  - { id: xtts, node: rtx4060, adapter: argus-http, base_url: "http://rtx4060:8141", container: argus-echo-xtts,
+      warm_path: /admin/wake, evict_path: /admin/evict, warm_mb: 2000, token_env: ECHO_ADMIN_TOKEN }
 
-  # argus-echo's XTTS-v2 on morpheus (same studio speakers as dragon's xtts). `serves: [xtts]` makes it a second home
-  # for target `xtts` (#40): dragon's sidecar comes first in config order, and a lease spills here when dragon is
-  # down or, under admission: enforce, has no room. The grant's base_url tells the caller which one to call.
-  - { id: echo-xtts, node: morpheus, adapter: argus-http, base_url: "http://morpheus:8141", container: argus-echo-xtts,
+  # A second home for target `xtts`: `serves` lets a lease spill here when the first is down or, under
+  # admission: enforce, has no room. The grant's base_url tells the caller which one to call.
+  - { id: echo-xtts, node: rtx3090, adapter: argus-http, base_url: "http://rtx3090:8141", container: argus-echo-xtts,
       serves: [xtts], warm_path: /admin/wake, evict_path: /admin/evict, warm_mb: 2000, token_env: ECHO_ADMIN_TOKEN }
 
-  # Immich's ML server (external: no resident contract, GET /ping answers "pong"). Its VRAM is attributed through
-  # the container; evict_by: stop lets iris stop it (Immich falls back to its CPU ML on jarrah) once a policy rule
-  # matching dragon/immich-ml is enforced. Add immich_machine_learning to dragon's IRIS_AGENT_CONTAINERS.
-  - { id: immich-ml, node: dragon, adapter: external, base_url: "http://dragon:3003", health_path: /ping,
-      container: immich_machine_learning, evict_by: stop }
-
-  # argus-lens (its gpu-tenant.yaml resident lens-captioner): /admin/unload frees the captioning model; there is no
-  # evict or wake route (the next caption reloads it). Its container is argus-lens, or <project>-argus-lens-1 when it
-  # runs in a compose project. Lens has its own ARGUS_ADMIN_TOKEN, so it gets its own token_env.
-  - { id: lens, node: morpheus, adapter: argus-http, base_url: "http://morpheus:8100", container: argus-lens,
+  # No evict or wake route: /admin/unload frees the model and the next request reloads it.
+  - { id: lens, node: rtx3090, adapter: argus-http, base_url: "http://rtx3090:8100", container: argus-lens,
       token_env: LENS_ADMIN_TOKEN }
 
-# Tenants' own containers (#36). An in-process lease counts the VRAM its tenant's own process already holds (a loaded
+  # external: no resident contract, up/down from health_path only. evict_by: stop lets iris stop the container (its
+  # clients must have a fallback) once a policy rule matching it is enforced. Its container must also be in that
+  # agent's IRIS_AGENT_CONTAINERS.
+  - { id: immich-ml, node: rtx4060, adapter: external, base_url: "http://rtx4060:3003", health_path: /ping,
+      container: immich_machine_learning, evict_by: stop }
+
+# Tenants' own containers. An in-process lease counts the VRAM its tenant's own process already holds (a loaded
 # model, an allocator arena) as part of what it asks for, and admission never evicts a tenant's residents for that
-# tenant's lease. A process whose compose service is the tenant's name (argus-curator) is linked without an entry.
+# tenant's lease. A process whose compose service is the tenant's name is linked without an entry.
 # tenants:
-#   argus-curator: { containers: ["studio-rec-curator"] }
+#   argus-curator: { containers: ["curator-worker"] }
 
 # Admission. "observe" (the default) grants every lease at once and records whether it would have fit; "enforce"
 # queues what does not fit, spills to the next node (the Ollama serving fewer leases first,
@@ -107,7 +59,7 @@ admission_min_idle_s: 60          # before a lower-class resident is evicted
 admission_same_class_idle_s: 300  # idle and loaded this long before a same-class one is (no ping-pong)
 lease_stall_s: 1800              # granted, heartbeating, no GPU activity this long: stalled (asked to yield if blocking)
 lease_stall_reclaim: false       # true: also end a stalled lease that blocks the queue, after lease_stall_s / 2 more
-pinned: []                    # resident ids (fnmatch) admission never evicts, e.g. "jarrah/ollama-jarrah/qwen3:8b"
+pinned: []                    # resident ids (fnmatch) admission never evicts, e.g. "gtx1070/ollama-gtx1070/qwen3:8b"
 
 # Self-registration. A tenant's gpu-tenant.yaml residents become services once an agent reports their containers (node
 # and published port from the agent's inventory), and agents with IRIS_BROKER_URL announce their nodes. The entries
@@ -119,8 +71,8 @@ registration_ttl_s: 900          # not renewed this long: lapsed (kept while the
 # Service directory: containers labelled argus.peer on any node are listed at /directory with their health. Name
 # peers here that no agent can see (a host without iris-agent); they come first for that name.
 # peers:
-#   ocr: http://192.168.1.50:8133
+#   ocr: http://192.0.2.50:8133
 directory_health_s: 30
 
-# Browser origins (the Studio page) allowed to make state-changing requests.
+# Browser origins allowed to make state-changing requests.
 trusted_origins: []

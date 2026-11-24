@@ -14,7 +14,7 @@ keepalive's ``resume`` cannot re-grant it.
 
 **Placement** follows the target. A service target (``ollama:<model>``, ``comfyui``) goes to the services that serve
 it: up before down, then the one serving fewest granted leases, then one where the model is already resident, then
-config order (``ollama-dragon`` before ``ollama-jarrah``). An Ollama that lists its pulled models and lacks this one
+config order (``ollama-rtx4060`` before ``ollama-gtx1070``). An Ollama that lists its pulled models and lacks this one
 is skipped, unless none has it. ``in-process`` goes to the constrained node, the tenant's own node, or any node that
 meets ``min_cc`` and ``bf16``.
 
@@ -23,14 +23,14 @@ meets ``min_cc`` and ``bf16``.
 - ``observe`` (the default): every request is granted at once on the first candidate. Each grant records whether it
   would have fit (``fits``), so footprints and waits come from real leases before admission acts on them.
 - ``enforce``: a lease is granted on the first candidate where it fits (DESIGN.md's inequality, see :func:`_fit`),
-  so a full dragon spills to jarrah. Where none fits, iris plans an eviction on a candidate (idle residents, least
+  so a full rtx4060 spills to gtx1070. Where none fits, iris plans an eviction on a candidate (idle residents, least
   recently used first, never busy, pinned, under a live lease, or of a higher class than the request) and grants once
   the agent sees the memory back; with nothing to evict the lease waits, queued. One that could never fit on any
   candidate is refused. The queue is served by class, with a wait bonus so nothing starves, and the head's
   reservation is kept: a lower lease is granted on that node only beside it.
 
 **Eviction plans** avoid thrash and evict as little as they can. A resident of the request's own class may be
-evicted (jarrah's "one model fills the card, keep it moving" needs it), but only once it has been idle, and loaded,
+evicted (gtx1070's "one model fills the card, keep it moving" needs it), but only once it has been idle, and loaded,
 for ``admission_same_class_idle_s`` (300 s; lower classes need only ``admission_min_idle_s``), so two tenants of one
 class cannot ping-pong a card. Lower classes go first, then the longest idle; victims the shortfall does not need are
 dropped; and across candidate nodes the cheapest plan wins (fewest same-class victims, then fewest MB evicted).
