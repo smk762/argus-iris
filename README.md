@@ -40,12 +40,12 @@ You need Docker with the NVIDIA container runtime, and Compose.
 
 ```bash
 git clone https://github.com/smk762/argus-iris && cd argus-iris
-cp deploy/.env.example deploy/.env               # set IRIS_AGENT_NODE, IRIS_AGENT_TOKEN and HOST_IP
+cp deploy/.env.example deploy/.env               # set IRIS_AGENT_NODE, IRIS_AGENT_TOKEN and HOST_IP (this host's LAN IP)
 cp deploy/iris.example.yaml deploy/iris.yaml     # set your nodes and services
 docker compose build && docker compose up -d     # broker and agent on this host
 ```
 
-Open `http://localhost:8120/ui/`. Read [SECURITY.md](SECURITY.md) before exposing either port: the agent holds the
+Open `http://<HOST_IP>:8120/ui/`. Ports bind to localhost unless `HOST_IP` is set. Read [SECURITY.md](SECURITY.md) before exposing either port: the agent holds the
 Docker socket.
 
 Or from PyPI: `pip install 'argus-iris[server,cli]'` for the broker, `pip install 'argus-iris[agent,cli]'` for a node.

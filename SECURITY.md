@@ -23,4 +23,6 @@ node needs the agent token.
 inventory. A registered tenant's admin token goes only to that tenant's services and is stored in
 `$IRIS_STATE_DIR/registrations.json` with mode 0600.
 
-**Ports bind to `HOST_IP`, `0.0.0.0` by default.** Set it to a private address.
+**Ports bind to localhost by default.** In compose, `HOST_IP` overrides it (a private address; the broker needs to
+reach the agents). Outside Docker, use `IRIS_HOST` and `IRIS_AGENT_HOST`, or `--host`. The image listens on all
+interfaces inside its container, so `docker run -p` needs an address too.

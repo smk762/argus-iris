@@ -13,7 +13,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, help="VRAM-aware G
 def serve(
     config: Path = typer.Option(None, "--config", "-c", envvar="IRIS_CONFIG", help="Broker YAML config."),
     policy: Path = typer.Option(None, "--policy", envvar="IRIS_POLICY", help="Residency policy YAML (optional)."),
-    host: str = typer.Option("0.0.0.0", envvar="IRIS_HOST"),
+    host: str = typer.Option("127.0.0.1", envvar="IRIS_HOST"),
     port: int = typer.Option(8120, envvar="IRIS_PORT"),
 ) -> None:
     """Run the broker."""
@@ -37,7 +37,7 @@ def serve(
 
 @app.command()
 def agent(
-    host: str = typer.Option("0.0.0.0", envvar="IRIS_AGENT_HOST"),
+    host: str = typer.Option("127.0.0.1", envvar="IRIS_AGENT_HOST"),
     port: int = typer.Option(9110, envvar="IRIS_AGENT_PORT"),
 ) -> None:
     """Run iris-agent on a GPU host. Configured by IRIS_AGENT_* environment variables."""

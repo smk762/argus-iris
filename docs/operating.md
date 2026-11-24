@@ -20,6 +20,7 @@ On each GPU host (see [deploy/agent.compose.yaml](../deploy/agent.compose.yaml))
 IRIS_AGENT_NODE=rtx3090 IRIS_AGENT_TOKEN=... IRIS_AGENT_CONTAINERS=comfyui argus-iris agent   # :9110
 ```
 
+It listens on localhost unless `IRIS_AGENT_HOST` is set (the broker: `IRIS_HOST`; compose: `HOST_IP`).
 The agent needs `pid: host`, `cgroup: host`, NVML, the Docker socket and `/sys/fs/cgroup` read-only. Container actions are disabled
 unless `IRIS_AGENT_TOKEN` is set, and apply only to containers in `IRIS_AGENT_CONTAINERS`.
 

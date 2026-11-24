@@ -19,5 +19,7 @@ COPY --from=builder /dist /tmp/dist
 RUN wheel=$(ls /tmp/dist/*.whl) \
     && uv pip install --system --no-cache "${wheel}[server,agent,cli]" \
     && rm -rf /tmp/dist
+# Inside the container only: compose decides where the port is published (HOST_IP, 127.0.0.1 by default).
+ENV IRIS_HOST=0.0.0.0 IRIS_AGENT_HOST=0.0.0.0
 EXPOSE 8120 9110
 CMD ["argus-iris", "serve"]
