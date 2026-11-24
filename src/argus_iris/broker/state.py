@@ -301,7 +301,7 @@ class Broker:
             self._fetch_snapshot(cfg), *(self._adapters[s.id].read(self._client) for s in services)
         )
         snapshot, error = snap_result
-        if snapshot is not None:
+        if snapshot is not None and name in self.config.nodes:  # it may have been forgotten during the await
             self._last_seen[name] = utcnow()
             self.registry.observe(name, snapshot.inventory)
         return compose_node(
@@ -314,6 +314,8 @@ class Broker:
         )
 
     def _apply(self, name: str, state: NodeState) -> None:
+        if name not in self.config.nodes:
+            return  # forgotten while this poll was in flight: do not bring it back
         for r in state.residents:
             r.tenant = self.leases.tenant_of(r)
         self.residency.annotate(state)
@@ -443,6 +445,8 @@ class Broker:
         for name in set(self.nodes) - set(self.config.nodes):
             del self.nodes[name]
             self._fingerprints.pop(name, None)
+            self._crowded.pop(name, None)
+            self._last_seen.pop(name, None)
         return changed
 
     async def refresh(self, name: str) -> NodeState:

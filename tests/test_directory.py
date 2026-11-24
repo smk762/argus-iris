@@ -374,3 +374,39 @@ async def test_the_broker_probes_itself_on_loopback(tmp_path) -> None:
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text(f"1 2 0:1 /var/lib/docker/containers/{me.id}/hostname /etc/hostname rw - ext4 x rw\n")
     assert own_container_id(str(mountinfo)) == me.id
+
+
+async def test_one_malformed_health_path_does_not_stop_the_round() -> None:
+    d = Directory(
+        BrokerConfig.model_validate(CONFIG),
+        httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"status": "ok"}))),
+    )
+    bad = c("bad", (80, 8200), labels={"argus.peer": "bad", "argus.health": "/a\x01b"})
+    d.rebuild({"morpheus": [bad, *INVENTORIES["morpheus"]]})
+    await d.probe()
+    health = {e.peer: e.health for e in d.entries}
+    assert health["bad"].status == "down" and "InvalidURL" in health["bad"].error
+    assert health["nudenet"].status == "ok"
+
+
+async def test_a_rebuild_during_a_probe_drops_results_that_no_longer_apply() -> None:
+    d = directory()
+    here = {"morpheus": [c("argus-retina-nudenet-1", (8080, 8130), labels={"argus.peer": "nudenet"})]}
+    moved = {"morpheus": [c("argus-retina-nudenet-1", (8080, 8999), labels={"argus.peer": "nudenet"})]}
+
+    async def probe_then(after: dict) -> None:
+        def svc(request: httpx.Request) -> httpx.Response:
+            d.rebuild(after)
+            return httpx.Response(200, json={"status": "ok"})
+
+        d._health.clear()
+        d.rebuild(here)
+        d._client = httpx.AsyncClient(transport=httpx.MockTransport(svc))
+        await d.probe()
+
+    await probe_then({})  # gone: its health does not come back
+    assert d.entries == [] and d._health == {}
+    await probe_then(moved)  # same container, another port: the old address's answer says nothing about it
+    assert d.entries[0].url.endswith(":8999") and d.entries[0].health is None
+    await probe_then(here)  # rebuilt, unchanged: the live entry gets the result
+    assert d.entries[0].health.status == "ok"
