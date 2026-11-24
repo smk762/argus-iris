@@ -4,7 +4,7 @@ Notable changes to `argus-iris`. Versions come from git tags via `hatch-vcs`.
 
 ## [Unreleased]
 
-## [0.2.0]
+## [0.2.1] - 2026-11-25
 
 ### Added
 
@@ -30,6 +30,10 @@ Notable changes to `argus-iris`. Versions come from git tags via `hatch-vcs`.
 - A model loaded during an unload is no longer written off as the service's floor (#33).
 - The directory probes the broker's own container on loopback (#54).
 - Audit findings in the agent, broker and dashboard (#46, #55).
+
+## [0.2.0] - 2026-11-24 [YANKED]
+
+Tagged on the wrong commit: the same code as 0.1.0. Use 0.2.1.
 
 ## [0.1.0] - 2026-11-20
 
