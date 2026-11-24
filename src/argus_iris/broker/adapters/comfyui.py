@@ -2,7 +2,7 @@
 
 Stock ComfyUI has no endpoint listing loaded models, and ``POST /free`` unloads them all, so iris treats ComfyUI as a
 single resident whose size comes from the agent's per-process VRAM. A non-empty queue iris did not grant is
-voluptas's own clients (unannounced load); it marks the resident busy.
+clients that take no lease (unannounced load); it marks the resident busy.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """The operator's policy file (DESIGN.md, "Policy: schedules, keepalive, idle-kill").
 
 ```yaml
-timezone: America/Los_Angeles        # cron fields are read in this zone; everything else is UTC
+timezone: UTC                        # cron fields are read in this zone; everything else is UTC
 windows:                             # a tenant's leases run at `class` while its window is open
   - name: nightly-audit
     cron: "0 1 * * *"
@@ -10,18 +10,18 @@ windows:                             # a tenant's leases run at `class` while it
     target: "ollama:*"
     class: batch
 residents:                           # first matching rule wins; ids/models/services are fnmatch patterns
-  - match: { node: dragon, ollama: "hf.co/inclusionAI/SingGuard-4b-GGUF:*" }
+  - match: { node: rtx4060, ollama: "hf.co/inclusionAI/SingGuard-4b-GGUF:*" }
     keepalive: always                # pinned: never evicted, Ollama keep_alive held at -1
-  - match: { node: jarrah, ollama: "*" }
+  - match: { node: gtx1070, ollama: "*" }
     idle_kill: 5m
     enforce: true                    # act on it; without this iris only reports what it would do
-  - match: { resident: "dragon/modernbert" }
+  - match: { resident: "rtx4060/modernbert" }
     idle_kill: 15m
     restart_residual_mb: 64          # unloaded but holding a CUDA context this big: restart the container
-  - match: { resident: "dragon/xtts" }
+  - match: { resident: "rtx4060/xtts" }
     idle_kill: 120s                  # GPU -> CPU (evict_path), kept warm in host RAM ...
     unload_after: 600s               # ... then unloaded fully after 10 more minutes idle
-  - match: { resident: "morpheus/comfyui" }
+  - match: { resident: "rtx3090/comfyui" }
     idle_kill: 30m
     restart_host_ram_mb: 12288       # idle 2 min (restart_host_ram_idle) with > 12 GiB host RAM: restart it
 ```
@@ -187,7 +187,7 @@ class ResidentRule(_Model):
     unload_after: Duration | None = None
     restart_residual_mb: int | None = Field(None, ge=0)
     # Restart the container once it has been idle `restart_host_ram_idle` and its anonymous memory (cgroup) is above
-    # this: ComfyUI's host RAM grows with use and only a restart returns it (voluptas#16). Unset, the tenant
+    # this: ComfyUI's host RAM grows with use and only a restart returns it. Unset, the tenant
     # manifest's `host_ram_restart_mb` hint for the resident's container applies.
     restart_host_ram_mb: int | None = Field(None, gt=0)
     restart_host_ram_idle: Duration = 120.0

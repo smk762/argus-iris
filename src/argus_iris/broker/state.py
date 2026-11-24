@@ -356,7 +356,7 @@ class Broker:
         """What admission can never free on *state*'s node, each resident as it holds the most, and which are pins.
 
         Pinned residents, and a pin that dropped out and residency will load again; a process with no adapter and no
-        tenant (Frigate: a tenant's own process comes and goes with its work); an external service iris may not stop;
+        tenant (an NVR: a tenant's own process comes and goes with its work); an external service iris may not stop;
         and the context an unloaded, CPU-parked or failed service keeps, which only a restart returns.
         """
         held: dict[str, Resident] = {}

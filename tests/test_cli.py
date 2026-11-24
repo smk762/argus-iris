@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+import pytest
 from typer.testing import CliRunner
 
 from argus_iris.cli import app
@@ -25,14 +26,14 @@ def test_serve_reads_only_its_token_names_from_the_suite_file(tmp_path, monkeypa
     config.write_text(
         f"""
 nodes:
-  morpheus: {{agent_url: "http://192.168.1.39:9110"}}
+  rtx3090: {{agent_url: "http://192.0.2.10:9110"}}
 caller_token_env: {CALLER}
 agent_token_env: {AGENT}
 services:
   - id: lens
-    node: morpheus
+    node: rtx3090
     adapter: argus-http
-    base_url: http://192.168.1.39:8100
+    base_url: http://192.0.2.10:8100
     token_env: {SERVICE}
 """
     )
@@ -55,3 +56,22 @@ services:
     assert result.exit_code == 0, result.output
     assert seen == {CALLER: "from-file", AGENT: "from-environment", SERVICE: "from-file", OTHER: None}
     assert "from-file" not in result.output and CALLER in result.output  # names, never a value
+
+
+@pytest.mark.parametrize("command", ["serve", "agent"])
+@pytest.mark.parametrize("override", [None, "192.0.2.10"])
+def test_binds_to_localhost_unless_overridden(tmp_path, monkeypatch, command, override):
+    names = {"serve": "IRIS_HOST", "agent": "IRIS_AGENT_HOST"}
+    monkeypatch.delenv(names[command], raising=False)
+    if override:
+        monkeypatch.setenv(names[command], override)
+    config = tmp_path / "iris.yaml"
+    config.write_text("nodes: {gpu: {agent_url: 'http://192.0.2.10:9110'}}\n")
+    monkeypatch.setenv("IRIS_CONFIG", str(config))
+    bound = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: bound.update(kw))
+    monkeypatch.setattr("argus_iris.server.app.create_app", lambda *a, **kw: None)
+    monkeypatch.setattr("argus_iris.agent.app.create_app", lambda *a, **kw: None)
+    result = CliRunner().invoke(app, [command])
+    assert result.exit_code == 0, result.output
+    assert bound["host"] == (override or "127.0.0.1")

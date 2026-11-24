@@ -20,24 +20,24 @@ from argus_iris.server.app import create_app
 CONFIG = BrokerConfig.model_validate(
     {
         "nodes": {
-            "morpheus": {"agent_url": "http://morpheus:9110"},
-            "dragon": {"agent_url": "http://dragon:9110"},
-            "jarrah": {"agent_url": "http://jarrah:9110"},
+            "rtx3090": {"agent_url": "http://rtx3090:9110"},
+            "rtx4060": {"agent_url": "http://rtx4060:9110"},
+            "gtx1070": {"agent_url": "http://gtx1070:9110"},
         },
         "services": [
-            {"id": "comfyui", "node": "morpheus", "adapter": "comfyui", "base_url": "http://morpheus:8188"},
-            {"id": "ollama-dragon", "node": "dragon", "adapter": "ollama", "base_url": "http://dragon:11434"},
-            {"id": "ollama-jarrah", "node": "jarrah", "adapter": "ollama", "base_url": "http://jarrah:11434"},
+            {"id": "comfyui", "node": "rtx3090", "adapter": "comfyui", "base_url": "http://rtx3090:8188"},
+            {"id": "ollama-rtx4060", "node": "rtx4060", "adapter": "ollama", "base_url": "http://rtx4060:11434"},
+            {"id": "ollama-gtx1070", "node": "gtx1070", "adapter": "ollama", "base_url": "http://gtx1070:11434"},
         ],
     }
 )
 
 MANIFEST = TenantManifest(
     tenant="agent-composer",
-    node="dragon",
+    node="rtx4060",
     kinds=[
         {"kind": "chat", "target": "ollama:qwen3:8b", "vram_mb": 6000, "model_mb": 5200},
-        {"kind": "guard", "target": "ollama:singguard", "vram_mb": 6000, "constraints": {"node": "dragon"}},
+        {"kind": "guard", "target": "ollama:singguard", "vram_mb": 6000, "constraints": {"node": "rtx4060"}},
         {"kind": "train", "vram_mb": 20000, "priority": "background", "preemptible": True},
     ],
 )
@@ -103,70 +103,70 @@ def ask(book: LeaseBook, **kw) -> object:
 def test_ollama_goes_to_the_first_service_in_config_order(world):
     book, _, _ = world
     rec = ask(book, target="ollama:qwen3:8b", vram_mb=1000)
-    assert (rec.state, rec.node, rec.base_url, rec.device) == ("granted", "dragon", "http://dragon:11434", 0)
+    assert (rec.state, rec.node, rec.base_url, rec.device) == ("granted", "rtx4060", "http://rtx4060:11434", 0)
 
 
 def test_a_model_resident_elsewhere_draws_the_lease_there(world):
     book, nodes, _ = world
-    nodes["jarrah"] = node("jarrah", models=[("ollama-jarrah", "nomic-embed-text:latest")])
+    nodes["gtx1070"] = node("gtx1070", models=[("ollama-gtx1070", "nomic-embed-text:latest")])
     rec = ask(book, target="ollama:nomic-embed-text", vram_mb=1000)
-    assert rec.node == "jarrah"  # untagged name matches Ollama's ":latest"
+    assert rec.node == "gtx1070"  # untagged name matches Ollama's ":latest"
 
 
 def test_a_down_service_is_skipped_and_constraints_are_honoured(world):
     book, nodes, _ = world
-    nodes["dragon"] = node("dragon", services={"ollama-dragon": False})
-    assert ask(book, target="ollama:qwen3:8b").node == "jarrah"
-    pinned = ask(book, target="ollama:qwen3:8b", constraints=GpuConstraints(node="dragon"))
-    assert pinned.node == "dragon"  # the only candidate, so it is placed there even while down
+    nodes["rtx4060"] = node("rtx4060", services={"ollama-rtx4060": False})
+    assert ask(book, target="ollama:qwen3:8b").node == "gtx1070"
+    pinned = ask(book, target="ollama:qwen3:8b", constraints=GpuConstraints(node="rtx4060"))
+    assert pinned.node == "rtx4060"  # the only candidate, so it is placed there even while down
 
 
 def test_a_service_without_the_model_pulled_is_skipped(world):
     book, nodes, _ = world
-    nodes["dragon"] = node("dragon", available=["llama3:8b"])
-    nodes["jarrah"] = node("jarrah", available=["qwen3:8b", "nomic-embed-text:latest"])
-    assert ask(book, target="ollama:qwen3:8b").node == "jarrah"
-    assert ask(book, target="ollama:nomic-embed-text").node == "jarrah"  # ":latest" implied
-    assert ask(book, target="ollama:llama3:8b").node == "dragon"
-    nodes["jarrah"] = node("jarrah", available=["Qwen2.5:7b"], models=[("ollama-jarrah", "Qwen2.5:7b")])
-    assert ask(book, target="ollama:qwen2.5:7B").node == "jarrah"  # Ollama names are case-insensitive
+    nodes["rtx4060"] = node("rtx4060", available=["llama3:8b"])
+    nodes["gtx1070"] = node("gtx1070", available=["qwen3:8b", "nomic-embed-text:latest"])
+    assert ask(book, target="ollama:qwen3:8b").node == "gtx1070"
+    assert ask(book, target="ollama:nomic-embed-text").node == "gtx1070"  # ":latest" implied
+    assert ask(book, target="ollama:llama3:8b").node == "rtx4060"
+    nodes["gtx1070"] = node("gtx1070", available=["Qwen2.5:7b"], models=[("ollama-gtx1070", "Qwen2.5:7b")])
+    assert ask(book, target="ollama:qwen2.5:7B").node == "gtx1070"  # Ollama names are case-insensitive
 
 
 def test_no_service_has_the_model_or_cannot_say_keeps_them_all(world):
     book, nodes, _ = world
-    nodes["dragon"] = node("dragon", available=[])
-    nodes["jarrah"] = node("jarrah", available=[])
-    assert ask(book, target="ollama:new:1b").node == "dragon"  # nobody has it: the caller may mean to pull
-    nodes["dragon"] = node("dragon", available=None)  # /api/tags unanswered: not filtered
-    nodes["jarrah"] = node("jarrah", available=["new:1b"])
+    nodes["rtx4060"] = node("rtx4060", available=[])
+    nodes["gtx1070"] = node("gtx1070", available=[])
+    assert ask(book, target="ollama:new:1b").node == "rtx4060"  # nobody has it: the caller may mean to pull
+    nodes["rtx4060"] = node("rtx4060", available=None)  # /api/tags unanswered: not filtered
+    nodes["gtx1070"] = node("gtx1070", available=["new:1b"])
     rec = ask(book, target="ollama:new:1b")
-    assert rec.node in {"dragon", "jarrah"} and len(book._candidates(rec)[0]) == 2
+    assert rec.node in {"rtx4060", "gtx1070"} and len(book._candidates(rec)[0]) == 2
 
 
 def test_concurrent_leases_spread_over_the_services(world):
     book, nodes, _ = world
-    nodes["dragon"] = node("dragon", models=[("ollama-dragon", "qwen3:8b")])
+    nodes["rtx4060"] = node("rtx4060", models=[("ollama-rtx4060", "qwen3:8b")])
     first = ask(book, target="ollama:qwen3:8b", vram_mb=1000)
     second = ask(book, target="ollama:qwen3:8b", vram_mb=1000)
-    assert (first.node, second.node) == ("dragon", "jarrah")  # busy beats warm
+    assert (first.node, second.node) == ("rtx4060", "gtx1070")  # busy beats warm
     book.release(first.lease_id, LeaseRelease())
-    assert ask(book, target="ollama:qwen3:8b", vram_mb=1000).node == "dragon"  # idle again, and warm
+    assert ask(book, target="ollama:qwen3:8b", vram_mb=1000).node == "rtx4060"  # idle again, and warm
 
 
 def test_full_node_is_still_granted_but_marked(world):
     book, nodes, _ = world
-    nodes["dragon"] = node("dragon", admissible=1000)
+    nodes["rtx4060"] = node("rtx4060", admissible=1000)
     rec = ask(book, target="ollama:qwen3:8b", vram_mb=3000)
-    assert (rec.state, rec.node, rec.fits, rec.admissible_mb) == ("granted", "dragon", False, 1000)
+    assert (rec.state, rec.node, rec.fits, rec.admissible_mb) == ("granted", "rtx4060", False, 1000)
     assert "observe-only" in rec.reason
 
 
 def test_fit_counts_granted_leases_and_resident_models(world):
     book, nodes, _ = world
-    nodes["dragon"] = node("dragon", admissible=4000, models=[("ollama-dragon", "qwen3:8b")])
+    nodes["rtx4060"] = node("rtx4060", admissible=4000, models=[("ollama-rtx4060", "qwen3:8b")])
     first = ask(book, target="ollama:qwen3:8b", vram_mb=6000, model_mb=5200)
     assert first.fits is True  # loaded already: only the 800 MB working set is new
-    big = ask(book, target="ollama:other", vram_mb=3500, constraints=GpuConstraints(node="dragon"))
+    big = ask(book, target="ollama:other", vram_mb=3500, constraints=GpuConstraints(node="rtx4060"))
     assert (big.fits, big.admissible_mb) == (False, 3200)  # 4000 less the first lease's 800
 
 
@@ -180,8 +180,8 @@ def test_unknown_target_is_granted_without_a_node(world):
 def test_in_process_uses_the_tenant_node(world):
     book, _, _ = world
     book.register(MANIFEST)
-    assert ask(book, kind="train").node == "dragon"
-    assert ask(book, tenant="other", constraints=GpuConstraints(node="jarrah")).node == "jarrah"
+    assert ask(book, kind="train").node == "rtx4060"
+    assert ask(book, tenant="other", constraints=GpuConstraints(node="gtx1070")).node == "gtx1070"
     assert ask(book, tenant="other", constraints=GpuConstraints(min_cc=9.0)).node is None
 
 
@@ -198,9 +198,9 @@ def test_manifest_fills_what_the_request_leaves_unset(world):
     assert (chat.vram_mb, chat.model_mb, chat.working_mb) == (6000, 5200, 800)
     own = ask(book, kind="chat", target="ollama:qwen3:8b", vram_mb=100, priority="batch")
     assert (own.vram_mb, own.model_mb, own.priority) == (100, None, "batch")
-    # The kind's node constraint holds even though the request sends none, and dragon's Ollama is down.
-    book._nodes()["dragon"] = node("dragon", services={"ollama-dragon": False})
-    assert ask(book, kind="guard", target="ollama:singguard").node == "dragon"
+    # The kind's node constraint holds even though the request sends none, and rtx4060's Ollama is down.
+    book._nodes()["rtx4060"] = node("rtx4060", services={"ollama-rtx4060": False})
+    assert ask(book, kind="guard", target="ollama:singguard").node == "rtx4060"
 
 
 def test_register_says_whether_the_manifest_changed(world):
@@ -272,7 +272,7 @@ def test_resume_re_attaches_under_the_same_id(world):
     book.tick()
     assert rec.state == "expired"
     back = ask(book, target="ollama:qwen3:8b", vram_mb=1000, resume=rec.lease_id)
-    assert (back.lease_id, back.state, back.resumed, back.node) == (rec.lease_id, "granted", True, "dragon")
+    assert (back.lease_id, back.state, back.resumed, back.node) == (rec.lease_id, "granted", True, "rtx4060")
     # A broker that never knew it (restart) does the same.
     fresh = ask(book, resume="lost-in-a-restart")
     assert (fresh.lease_id, fresh.state, fresh.heartbeats) == ("lost-in-a-restart", "granted", 1)
@@ -366,7 +366,7 @@ async def test_cortex_client_takes_and_releases_a_lease(monkeypatch):
     app = create_app(broker=broker, poll=False)
     coord = coordinator(app, manifest=MANIFEST)
     async with coord.alease(caller="rag-chat", min_vram_mb=0, kind="chat", target="ollama:qwen3:8b") as lease:
-        assert (lease.via, lease.node, lease.base_url) == ("broker", "dragon", "http://dragon:11434")
+        assert (lease.via, lease.node, lease.base_url) == ("broker", "rtx4060", "http://rtx4060:11434")
         rec = broker.leases.leases[lease.lease_id]
         assert (rec.state, rec.vram_mb, rec.caller) == ("granted", 6000, "rag-chat")
         lease.peak_vram_mb = 5900
@@ -397,7 +397,7 @@ def test_routes_and_auth(monkeypatch):
 
     # No token configured: the lease routes are open (the token is optional, DESIGN.md "API").
     status = client.post("/leases", json=body).json()
-    assert (status["state"], status["node"], status["lease_version"]) == ("granted", "dragon", LEASE_VERSION)
+    assert (status["state"], status["node"], status["lease_version"]) == ("granted", "rtx4060", LEASE_VERSION)
     lid = status["lease_id"]
     assert client.get(f"/leases/{lid}").json()["state"] == "granted"
     assert client.post(f"/leases/{lid}/heartbeat", json={}).json()["state"] == "granted"

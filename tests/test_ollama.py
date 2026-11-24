@@ -11,7 +11,7 @@ from argus_iris.broker.adapters.ollama import OllamaAdapter, _parse_time
 from argus_iris.broker.config import ServiceConfig
 
 SERVICE = ServiceConfig.model_validate(
-    {"id": "ollama", "node": "dragon", "adapter": "ollama", "base_url": "http://dragon:11434"}
+    {"id": "ollama", "node": "rtx4060", "adapter": "ollama", "base_url": "http://rtx4060:11434"}
 )
 
 

@@ -16,7 +16,7 @@ services:
     pid: host                     # NVML reports host PIDs
     cgroup: host                  # else /proc/<pid>/cgroup paths are relative (/../..) and anon memory is unreadable
     ports:
-      - "${HOST_IP:-0.0.0.0}:9110:9110"
+      - "${HOST_IP:-127.0.0.1}:9110:9110"
     # Its own network: when compose.yaml runs the broker alongside, the broker still reaches it at the host's LAN
     # address like every other node's agent (Docker does not hairpin a published port back into the same bridge).
     networks: [iris-agent]
@@ -27,11 +27,11 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: utility,compute
       ARGUS_PEER: iris-agent      # the argus.peer label above, repeated for /health
-      IRIS_AGENT_NODE: ${IRIS_AGENT_NODE:?set to morpheus, dragon or jarrah}
+      IRIS_AGENT_NODE: ${IRIS_AGENT_NODE:?a short name for this host's GPU}
       IRIS_AGENT_POLL_S: ${IRIS_AGENT_POLL_S:-5}
       # Broker→agent token. Unset disables container actions entirely.
       IRIS_AGENT_TOKEN: ${IRIS_AGENT_TOKEN:-}
-      # The only containers the broker may start/stop/restart on this host, e.g. voluptas_comfyui on morpheus.
+      # The only containers the broker may start/stop/restart on this host, e.g. comfyui.
       IRIS_AGENT_CONTAINERS: ${IRIS_AGENT_CONTAINERS:-}
       # Also containers labelled argus.iris.manage=true (in their own compose file on this host). Off unless set to 1.
       IRIS_AGENT_MANAGE_LABEL: ${IRIS_AGENT_MANAGE_LABEL:-}

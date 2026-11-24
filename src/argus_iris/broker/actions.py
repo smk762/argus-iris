@@ -4,7 +4,7 @@ idle-kill (later rollout steps) call :func:`evict_resident` themselves.
 Warming a service means making it answer again: if its health check fails and it has a container, the node's agent
 starts that container (subject to the agent's own allowlist), then iris waits for the health check to pass. If it then
 has a ``warm_path`` (argus-http), iris calls that to load its model onto the GPU. This is what brings ComfyUI back
-after voluptas's old idle stop left it down.
+after an idle watcher left it down.
 
 Evicting a resident frees its VRAM through its adapter (DESIGN.md, "Adapters"): Ollama is sent ``keep_alive: 0`` for
 the model, ComfyUI ``POST /free`` (all its models: it is one resident), and an argus-http service its ``evict_path``
@@ -324,7 +324,7 @@ async def evict_resident(
     # Not for an Ollama model still listed unconfirmed, though: it is still loaded (a slow or refused unload), and
     # recording its full size would make it count as evicted, so idle-kill would never try it again.
     # Nor for anything that grew during the wait or says it is on the GPU: a request loaded the model meanwhile
-    # (dragon/xtts, 2026-11-21: 146 MB on the CPU, unload sent, 1970 MB back on the GPU, written off as its floor).
+    # (rtx4060/xtts, 2026-11-21: 146 MB on the CPU, unload sent, 1970 MB back on the GPU, written off as its floor).
     loaded = now is not None and (now.vram_mb > result.before_mb + RESIDUAL_SLACK_MB or on_gpu(now))
     if not loaded and (result.confirmed or now is None or resident.source != ResidentSource.OLLAMA):
         broker.residuals[resident.id] = result.after_mb
@@ -344,7 +344,7 @@ async def set_keep_alive(broker: Broker, resident: Resident, keep_alive: str | i
 
     The request carries the context the model is loaded with: Ollama reloads a model for a request whose ``num_ctx``
     differs, so a bare call reloaded a model its caller had loaded with a larger context (SingGuard at 16384 on
-    dragon), and the caller's next request reloaded it back, about once a minute while it was pinned. For a model that
+    rtx4060), and the caller's next request reloaded it back, about once a minute while it was pinned. For a model that
     is not loaded (residency restoring a pin, #35) the same call loads it, at the context it had.
     """
     svc = next((s for s in broker.config.services if s.id == resident.service), None)

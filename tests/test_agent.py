@@ -29,11 +29,11 @@ class FakeDocker:
         self.listing = [
             {
                 "Id": COMFY_ID,
-                "Names": ["/voluptas_comfyui"],
+                "Names": ["/imagegen_comfyui"],
                 "State": "running",
                 "Labels": {
                     "com.docker.compose.service": "comfyui",
-                    "com.docker.compose.project": "voluptas",
+                    "com.docker.compose.project": "imagegen",
                     "argus.peer": "comfyui",
                     "traefik.http.routers.x.middlewares": "basic-auth secret",
                 },
@@ -41,7 +41,7 @@ class FakeDocker:
                     {"PrivatePort": 8188, "PublicPort": 8188, "Type": "tcp", "IP": "0.0.0.0"},
                     {"PrivatePort": 8188, "PublicPort": 8188, "Type": "tcp", "IP": "::"},
                 ],
-                "HostConfig": {"NetworkMode": "voluptas_default"},
+                "HostConfig": {"NetworkMode": "imagegen_default"},
             },
             {
                 "Id": "e" * 64,
@@ -56,12 +56,12 @@ class FakeDocker:
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(f"{request.method} {request.url.path}")
         path = request.url.path
-        if request.method == "GET" and path in (f"/containers/{COMFY_ID}/json", "/containers/voluptas_comfyui/json"):
+        if request.method == "GET" and path in (f"/containers/{COMFY_ID}/json", "/containers/imagegen_comfyui/json"):
             return httpx.Response(
                 200,
                 json={
                     "Id": COMFY_ID,
-                    "Name": "/voluptas_comfyui",
+                    "Name": "/imagegen_comfyui",
                     "Config": {"Labels": {"com.docker.compose.service": "comfyui"}},
                     "State": {"Running": True, "Pid": 100},
                 },
@@ -80,9 +80,9 @@ class FakeDocker:
             )
         if request.method == "POST" and path.startswith("/containers/echo/"):
             return httpx.Response(204)
-        if request.method == "POST" and path == "/containers/voluptas_comfyui/start":
+        if request.method == "POST" and path == "/containers/imagegen_comfyui/start":
             return httpx.Response(304)
-        if request.method == "POST" and path.startswith("/containers/voluptas_comfyui/"):
+        if request.method == "POST" and path.startswith("/containers/imagegen_comfyui/"):
             return httpx.Response(204)
         return httpx.Response(404, json={"message": "no such container"})
 
@@ -102,9 +102,9 @@ def host(tmp_path: Path) -> tuple[Path, Path]:
 def make_agent(host: tuple[Path, Path], docker: FakeDocker, *, token: str | None = TOKEN) -> Agent:
     proc, cgroup = host
     settings = AgentSettings(
-        node="morpheus",
+        node="rtx3090",
         token=token,
-        containers=frozenset({"voluptas_comfyui"}),
+        containers=frozenset({"imagegen_comfyui"}),
         proc_root=proc,
         cgroup_root=cgroup,
     )
@@ -129,13 +129,13 @@ async def test_poll_resolves_containers_and_memory(host) -> None:
     snap = await agent.poll_once()
     comfy, desktop = sorted(snap.processes, key=lambda p: p.pid)
     assert (comfy.container, comfy.service, comfy.vram_mb, comfy.sm_util_pct) == (
-        "voluptas_comfyui",
+        "imagegen_comfyui",
         "comfyui",
         7352,
         60,
     )
     assert desktop.container is None and desktop.container_id is None
-    assert [(c.container, c.anon_mb) for c in snap.containers] == [("voluptas_comfyui", 6144)]
+    assert [(c.container, c.anon_mb) for c in snap.containers] == [("imagegen_comfyui", 6144)]
     assert snap.host is not None and snap.host.available_mb == 18400
 
     # A second poll does not inspect the container again (one lookup per new container ID).
@@ -161,11 +161,11 @@ def test_snapshot_health_and_metrics(host) -> None:
         assert early.json()["checks"]["nvml"]["detail"] == "no sample yet"
         client.portal.call(agent.poll_once)
         body = client.get("/snapshot").json()
-        assert body["node"] == "morpheus" and len(body["processes"]) == 2
+        assert body["node"] == "rtx3090" and len(body["processes"]) == 2
         health = client.get("/health").json()
         assert health["status"] == "ok"
         # Every field /health had before argus-cortex's ServiceHealth, with the same meaning.
-        assert health["node"] == "morpheus" and health["version"] == argus_iris.__version__
+        assert health["node"] == "rtx3090" and health["version"] == argus_iris.__version__
         assert (
             health["nvml_error"] is None
             and health["docker_error"] is None
@@ -175,8 +175,8 @@ def test_snapshot_health_and_metrics(host) -> None:
         contract = ServiceHealth.model_validate(health)
         assert contract.service == "argus-iris" and contract.checks["nvml"].ok
         metrics = client.get("/metrics").text
-        assert 'iris_agent_process_vram_mb{container="voluptas_comfyui"' in metrics
-        assert 'iris_agent_container_anon_mb{container="voluptas_comfyui",node="morpheus"} 6144.0' in metrics
+        assert 'iris_agent_process_vram_mb{container="imagegen_comfyui"' in metrics
+        assert 'iris_agent_container_anon_mb{container="imagegen_comfyui",node="rtx3090"} 6144.0' in metrics
         agent._sample = lambda: Sample(error="NVMLError: GPU is lost")
         client.portal.call(agent.poll_once)
         lost = client.get("/health").json()
@@ -187,28 +187,28 @@ def test_container_actions_are_token_and_allowlist_gated(host) -> None:
     docker = FakeDocker()
     with TestClient(create_app(agent=make_agent(host, docker), poll=False)) as client:
         auth = {"Authorization": f"Bearer {TOKEN}"}
-        assert client.post("/containers/voluptas_comfyui/restart").status_code == 401
+        assert client.post("/containers/imagegen_comfyui/restart").status_code == 401
         assert (
-            client.post("/containers/voluptas_comfyui/restart", headers={"Authorization": "Bearer no"}).status_code
+            client.post("/containers/imagegen_comfyui/restart", headers={"Authorization": "Bearer no"}).status_code
             == 401
         )
         assert client.post("/containers/postgres/stop", headers=auth).status_code == 403
-        assert client.post("/containers/voluptas_comfyui/explode", headers=auth).status_code == 422
+        assert client.post("/containers/imagegen_comfyui/explode", headers=auth).status_code == 422
 
-        r = client.post("/containers/voluptas_comfyui/restart", headers=auth)
+        r = client.post("/containers/imagegen_comfyui/restart", headers=auth)
         assert r.status_code == 200 and r.json() == {
-            "container": "voluptas_comfyui",
+            "container": "imagegen_comfyui",
             "action": "restart",
             "ok": True,
             "detail": "done",
         }
-        assert client.post("/containers/voluptas_comfyui/start", headers=auth).json()["detail"] == "unchanged"
+        assert client.post("/containers/imagegen_comfyui/start", headers=auth).json()["detail"] == "unchanged"
     assert "POST /containers/postgres/stop" not in docker.calls
 
 
 def test_actions_disabled_without_token(host) -> None:
     with TestClient(create_app(agent=make_agent(host, FakeDocker(), token=None), poll=False)) as client:
-        r = client.post("/containers/voluptas_comfyui/start", headers={"Authorization": "Bearer anything"})
+        r = client.post("/containers/imagegen_comfyui/start", headers={"Authorization": "Bearer anything"})
         assert r.status_code == 403
         assert "IRIS_AGENT_TOKEN" in r.json()["detail"]
 
@@ -228,7 +228,7 @@ async def test_docker_error_clears_once_docker_recovers(host) -> None:
     docker = FakeDocker()
     agent = make_agent(host, docker)
     # "sidecar" is allow-listed but not on the GPU, so every poll inspects it in the allowlist loop.
-    agent.settings = dataclasses.replace(agent.settings, containers=frozenset({"voluptas_comfyui", "sidecar"}))
+    agent.settings = dataclasses.replace(agent.settings, containers=frozenset({"imagegen_comfyui", "sidecar"}))
     await agent.poll_once()  # caches the GPU container's ID
     assert agent.docker_error is None
 
@@ -248,8 +248,8 @@ async def test_inventory_lists_every_container_with_ports_and_management(host) -
     agent = make_agent(host, FakeDocker())
     snap = await agent.poll_once()
     inv = {e.name: e for e in snap.inventory}
-    comfy, echo = inv["voluptas_comfyui"], inv["echo"]
-    assert comfy.running and comfy.service == "comfyui" and comfy.project == "voluptas"
+    comfy, echo = inv["imagegen_comfyui"], inv["echo"]
+    assert comfy.running and comfy.service == "comfyui" and comfy.project == "imagegen"
     assert [(p.private, p.public) for p in comfy.ports] == [(8188, 8188)]  # IPv4 and IPv6 bindings fold into one
     assert comfy.ports[0].ips == ["0.0.0.0", "::"]
     assert comfy.managed  # allow-listed
@@ -296,7 +296,7 @@ async def test_announce_posts_node_with_agent_token(host) -> None:
         assert await agent.announce(client)
     req = seen[0]
     assert req.url == "http://broker:8120/nodes" and req.headers["authorization"] == f"Bearer {TOKEN}"
-    assert json.loads(req.content) == {"name": "morpheus", "agent_url": None, "port": 9110, "gpu": 0}
+    assert json.loads(req.content) == {"name": "rtx3090", "agent_url": None, "port": 9110, "gpu": 0}
 
 
 def test_a_failing_announce_is_retried_and_never_breaks_shutdown(host, monkeypatch) -> None:

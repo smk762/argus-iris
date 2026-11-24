@@ -12,7 +12,7 @@ from argus_iris.broker.config import BrokerConfig
 from argus_iris.broker.state import Broker
 from argus_iris.server.app import create_app
 
-CONFIG = {"nodes": {"morpheus": {"agent_url": "http://morpheus:9110"}}}
+CONFIG = {"nodes": {"rtx3090": {"agent_url": "http://rtx3090:9110"}}}
 
 
 def test_dashboard_is_served() -> None:
@@ -156,7 +156,7 @@ def test_a_stale_registry_read_neither_drops_a_new_node_nor_overwrites_newer_dat
 @pytest.mark.parametrize(
     ("page", "broker"),
     [
-        ("http://192.168.1.39:8120/ui/?x=1#connect", "http://192.168.1.39:8120"),
+        ("http://192.0.2.10:8120/ui/?x=1#connect", "http://192.0.2.10:8120"),
         ("https://lan.example/iris/ui/", "https://lan.example/iris"),
     ],
 )

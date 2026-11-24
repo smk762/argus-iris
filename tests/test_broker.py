@@ -20,29 +20,29 @@ GIB = 1024**3
 
 CONFIG = {
     "nodes": {
-        "morpheus": {"agent_url": "http://morpheus:9110/", "reserve_mb": 3500},
-        "dragon": {"agent_url": "http://dragon:9110"},
+        "rtx3090": {"agent_url": "http://rtx3090:9110/", "reserve_mb": 3500},
+        "rtx4060": {"agent_url": "http://rtx4060:9110"},
     },
     "services": [
         {
             "id": "comfyui",
-            "node": "morpheus",
+            "node": "rtx3090",
             "adapter": "comfyui",
-            "base_url": "http://morpheus:8188",
-            "container": "voluptas_comfyui",
+            "base_url": "http://rtx3090:8188",
+            "container": "imagegen_comfyui",
         },
         {
             "id": "lens",
-            "node": "morpheus",
+            "node": "rtx3090",
             "adapter": "argus-http",
-            "base_url": "http://morpheus:8101",
+            "base_url": "http://rtx3090:8101",
             "container": "lens",
         },
         {
             "id": "ollama",
-            "node": "dragon",
+            "node": "rtx4060",
             "adapter": "ollama",
-            "base_url": "http://dragon:11434",
+            "base_url": "http://rtx4060:11434",
             "container": "ollama",
         },
     ],
@@ -63,39 +63,39 @@ def snapshot(node: str, total: int, free: int, procs: list[GpuProcess]) -> dict:
     ).model_dump(mode="json")
 
 
-def network(*, dragon_agent_up: bool = True, comfy_queue: int = 0, tags: bool = True):
+def network(*, rtx4060_agent_up: bool = True, comfy_queue: int = 0, tags: bool = True):
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
-        if url == "http://morpheus:9110/snapshot":
+        if url == "http://rtx3090:9110/snapshot":
             return httpx.Response(
                 200,
                 json=snapshot(
-                    "morpheus",
+                    "rtx3090",
                     24576,
                     13000,
                     [
-                        proc(1, 7352, "voluptas_comfyui", 400),
+                        proc(1, 7352, "imagegen_comfyui", 400),
                         proc(2, 2254, "lens", 30),
                         proc(3, 500, "a2f", 5),
                         proc(4, 470, None),
                     ],
                 ),
             )
-        if url == "http://dragon:9110/snapshot":
-            if not dragon_agent_up:
+        if url == "http://rtx4060:9110/snapshot":
+            if not rtx4060_agent_up:
                 raise httpx.ConnectError("refused")
-            return httpx.Response(200, json=snapshot("dragon", 8188, 900, [proc(10, 6400, "ollama", 12)]))
-        if url == "http://morpheus:8188/system_stats":
+            return httpx.Response(200, json=snapshot("rtx4060", 8188, 900, [proc(10, 6400, "ollama", 12)]))
+        if url == "http://rtx3090:8188/system_stats":
             return httpx.Response(
                 200, json={"system": {"comfyui_version": "0.19.3"}, "devices": [{"vram_total": 24 * GIB}]}
             )
-        if url == "http://morpheus:8188/queue":
+        if url == "http://rtx3090:8188/queue":
             return httpx.Response(200, json={"queue_running": [["x"]] * comfy_queue, "queue_pending": []})
-        if url == "http://morpheus:8101/health":
+        if url == "http://rtx3090:8101/health":
             return httpx.Response(200, json={"status": "ok", "vram_status": {"loaded": True}})
-        if url == "http://dragon:11434/api/tags" and tags:
+        if url == "http://rtx4060:11434/api/tags" and tags:
             return httpx.Response(200, json={"models": [{"name": "qwen3:8b"}, {"model": "nomic-embed-text:latest"}]})
-        if url == "http://dragon:11434/api/ps":
+        if url == "http://rtx4060:11434/api/ps":
             return httpx.Response(
                 200,
                 json={
@@ -117,13 +117,13 @@ def network(*, dragon_agent_up: bool = True, comfy_queue: int = 0, tags: bool = 
 async def test_poll_composes_residents_and_ledger() -> None:
     broker = Broker(BrokerConfig.model_validate(CONFIG), client=network())
     await broker.poll_once()
-    m = broker.nodes["morpheus"]
+    m = broker.nodes["rtx3090"]
     assert m.reachable
     by_id = {r.id: r for r in m.residents}
-    assert set(by_id) == {"morpheus/comfyui", "morpheus/lens", "morpheus/a2f", "morpheus/pid-4"}
-    assert by_id["morpheus/comfyui"].vram_mb == 7352 and by_id["morpheus/comfyui"].idle_s == 400
-    assert by_id["morpheus/lens"].detail["vram_status"] == {"loaded": True}
-    assert by_id["morpheus/a2f"].source == "process"  # observed: no service configured for it
+    assert set(by_id) == {"rtx3090/comfyui", "rtx3090/lens", "rtx3090/a2f", "rtx3090/pid-4"}
+    assert by_id["rtx3090/comfyui"].vram_mb == 7352 and by_id["rtx3090/comfyui"].idle_s == 400
+    assert by_id["rtx3090/lens"].detail["vram_status"] == {"loaded": True}
+    assert by_id["rtx3090/a2f"].source == "process"  # observed: no service configured for it
 
     ledger = m.ledger
     assert ledger is not None
@@ -132,7 +132,7 @@ async def test_poll_composes_residents_and_ledger() -> None:
     # managed (comfyui + lens) + reserve + headroom, capped by NVML free - headroom
     assert ledger.admissible_mb == min(13000 - 512, 24576 - 3500 - 512 - (7352 + 2254))
 
-    d = broker.nodes["dragon"]
+    d = broker.nodes["rtx4060"]
     (guard,) = d.residents
     assert guard.model == "hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M"
     assert guard.vram_mb == 6144 and guard.idle_s == 12
@@ -144,26 +144,26 @@ async def test_poll_composes_residents_and_ledger() -> None:
 async def test_busy_comfyui_is_never_idle() -> None:
     broker = Broker(BrokerConfig.model_validate(CONFIG), client=network(comfy_queue=1))
     await broker.poll_once()
-    comfy = next(r for r in broker.nodes["morpheus"].residents if r.service == "comfyui")
+    comfy = next(r for r in broker.nodes["rtx3090"].residents if r.service == "comfyui")
     assert comfy.busy and comfy.idle_s is None
 
 
 async def test_ollama_reports_its_pulled_models() -> None:
     broker = Broker(BrokerConfig.model_validate(CONFIG), client=network())
     await broker.poll_once()
-    (svc,) = [s for s in broker.nodes["dragon"].services if s.adapter == "ollama"]
+    (svc,) = [s for s in broker.nodes["rtx4060"].services if s.adapter == "ollama"]
     assert (svc.up, svc.available) == (True, ["nomic-embed-text:latest", "qwen3:8b"])
 
     broker = Broker(BrokerConfig.model_validate(CONFIG), client=network(tags=False))
     await broker.poll_once()
-    (svc,) = [s for s in broker.nodes["dragon"].services if s.adapter == "ollama"]
+    (svc,) = [s for s in broker.nodes["rtx4060"].services if s.adapter == "ollama"]
     assert (svc.up, svc.available) == (True, None)  # /api/tags failing is "unknown", not "has nothing"
 
 
 async def test_unreachable_agent_keeps_ollama_residents() -> None:
-    broker = Broker(BrokerConfig.model_validate(CONFIG), client=network(dragon_agent_up=False))
+    broker = Broker(BrokerConfig.model_validate(CONFIG), client=network(rtx4060_agent_up=False))
     await broker.poll_once()
-    d = broker.nodes["dragon"]
+    d = broker.nodes["rtx4060"]
     assert not d.reachable and "ConnectError" in (d.error or "")
     assert d.ledger is None
     assert [r.model for r in d.residents] == ["hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M"]
@@ -183,7 +183,7 @@ def test_http_api() -> None:
     with TestClient(create_app(broker=broker, poll=False)) as client:
         client.portal.call(broker.poll_once)
         health = client.get("/health").json()
-        assert health["agents"] == {"morpheus": True, "dragon": True} and health["mode"] == "observe-only"
+        assert health["agents"] == {"rtx3090": True, "rtx4060": True} and health["mode"] == "observe-only"
         # Every field /health had before argus-cortex's ServiceHealth, with the same meaning.
         assert health["status"] == "ok" and health["version"] == argus_iris.__version__
         assert {"polls", "leases", "pins_missing", "crowded_out", "registered"} <= set(health)
@@ -195,25 +195,25 @@ def test_http_api() -> None:
         assert set(contract.wire) == {"lease_version", "tenant_version", "resident_version", "directory_version"}
         assert client.get("/health", params={"checks": "0"}).json()["checks"] == {}
         # An unreachable agent is degraded on the very next read (the check is not cached), and still a 200.
-        broker.nodes["dragon"].reachable = False
+        broker.nodes["rtx4060"].reachable = False
         r = client.get("/health")
-        assert r.status_code == 200 and r.json()["status"] == "degraded" and r.json()["agents"]["dragon"] is False
+        assert r.status_code == 200 and r.json()["status"] == "degraded" and r.json()["agents"]["rtx4060"] is False
         assert r.json()["checks"]["agents"]["detail"] == "1 of 2 unreachable"
-        broker.nodes["dragon"].reachable = True
+        broker.nodes["rtx4060"].reachable = True
         assert client.get("/health").json()["status"] == "ok"
-        assert {n["name"] for n in client.get("/nodes").json()} == {"morpheus", "dragon"}
-        assert client.get("/nodes/jarrah").status_code == 404
-        assert [r["node"] for r in client.get("/residents", params={"node": "dragon"}).json()] == ["dragon"]
+        assert {n["name"] for n in client.get("/nodes").json()} == {"rtx3090", "rtx4060"}
+        assert client.get("/nodes/gtx1070").status_code == 404
+        assert [r["node"] for r in client.get("/residents", params={"node": "rtx4060"}).json()] == ["rtx4060"]
         metrics = client.get("/metrics").text
-        assert 'iris_agent_up{node="morpheus"} 1.0' in metrics
-        assert 'iris_resident_vram_mb{model="",node="morpheus",resident="morpheus/comfyui"' in metrics
+        assert 'iris_agent_up{node="rtx3090"} 1.0' in metrics
+        assert 'iris_resident_vram_mb{model="",node="rtx3090",resident="rtx3090/comfyui"' in metrics
         # The write guard is installed: a cross-site write is refused before any route.
         r = client.post("/leases", headers={"Origin": "https://evil.example"})
         assert r.status_code == 403
 
 
 def test_config_validation(tmp_path: Path) -> None:
-    bad = {**CONFIG, "services": [*CONFIG["services"], {**CONFIG["services"][0], "node": "jarrah", "id": "x"}]}
+    bad = {**CONFIG, "services": [*CONFIG["services"], {**CONFIG["services"][0], "node": "gtx1070", "id": "x"}]}
     with pytest.raises(ValidationError, match="unknown nodes"):
         BrokerConfig.model_validate(bad)
     dupe = {**CONFIG, "services": [CONFIG["services"][0], CONFIG["services"][0]]}
@@ -221,10 +221,10 @@ def test_config_validation(tmp_path: Path) -> None:
         BrokerConfig.model_validate(dupe)
 
     path = tmp_path / "iris.yaml"
-    path.write_text("nodes:\n  jarrah: { agent_url: 'http://jarrah:9110/' }\n")
+    path.write_text("nodes:\n  gtx1070: { agent_url: 'http://gtx1070:9110/' }\n")
     cfg = load_config(path)
-    assert cfg.nodes["jarrah"].agent_url == "http://jarrah:9110"
-    assert cfg.nodes["jarrah"].headroom_mb == 512
+    assert cfg.nodes["gtx1070"].agent_url == "http://gtx1070:9110"
+    assert cfg.nodes["gtx1070"].headroom_mb == 512
 
 
 def test_example_config_loads() -> None:
@@ -234,7 +234,7 @@ def test_example_config_loads() -> None:
 def test_parse_health_reads_the_resident_contract() -> None:
     from argus_iris.broker.adapters.http import parse_health
 
-    # ResidentHealth (argus-cortex 0.7): voluptas image-gen-diffusers, agent-composer's sidecars, extras kept
+    # ResidentHealth (argus-cortex 0.7): imagegen image-gen-diffusers, agent-composer's sidecars, extras kept
     r = parse_health(
         {"status": "ok", "model_state": "gpu", "busy": False, "idle_s": 3.5, "gpu": {"total_mb": 24576, "loaded": True}}
     )
@@ -246,7 +246,7 @@ def test_parse_health_reads_the_resident_contract() -> None:
 def test_parse_health_reads_shapes_off_the_contract() -> None:
     from argus_iris.broker.adapters.http import parse_health
 
-    # voluptas Miso (smk762/voluptas#26): busy is an object while working, null when idle. Busy must not read as idle.
+    # imagegen Miso (smk762/imagegen#26): busy is an object while working, null when idle. Busy must not read as idle.
     miso = {"status": "ok", "model_state": "gpu", "idle_s": None, "gpu": {"allocated_mb": 8.1, "reserved_mb": 2004.0}}
     r = parse_health({**miso, "busy": {"request_id": "r1", "endpoint": "stream", "busy_s": 3.2}})
     assert (r.busy, r.idle_s, r.detail["model_state"]) == (True, None, "gpu")
@@ -278,7 +278,7 @@ async def test_off_contract_is_logged_once_per_change(monkeypatch) -> None:
     monkeypatch.setattr(http_adapter.log, "warning", lambda event, **kw: logged.append(event))
     monkeypatch.setattr(http_adapter.log, "info", lambda event, **kw: logged.append(event))
     adapter = http_adapter.ArgusHttpAdapter(
-        ServiceConfig(id="miso", node="morpheus", adapter="argus-http", base_url="http://morpheus:8034")
+        ServiceConfig(id="miso", node="rtx3090", adapter="argus-http", base_url="http://rtx3090:8034")
     )
     for _ in range(3):
         await adapter.read(client)
@@ -291,19 +291,19 @@ async def test_service_idle_and_token(monkeypatch) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/snapshot"):
-            return httpx.Response(200, json=snapshot("dragon", 8188, 4000, [proc(7, 1300, "xtts", idle=2)]))
+            return httpx.Response(200, json=snapshot("rtx4060", 8188, 4000, [proc(7, 1300, "xtts", idle=2)]))
         seen.append(request.headers.get("authorization"))
         return httpx.Response(200, json={"gpu": {"loaded": True, "model_state": "gpu", "idle_s": 900}})
 
     cfg = BrokerConfig.model_validate(
         {
-            "nodes": {"dragon": {"agent_url": "http://dragon:9110"}},
+            "nodes": {"rtx4060": {"agent_url": "http://rtx4060:9110"}},
             "services": [
                 {
                     "id": "xtts",
-                    "node": "dragon",
+                    "node": "rtx4060",
                     "adapter": "argus-http",
-                    "base_url": "http://dragon:9150/api/runtime/residents/xtts",
+                    "base_url": "http://rtx4060:9150/api/runtime/residents/xtts",
                     "container": "xtts",
                     "token_env": "RAG_CHAT_TOKEN",
                 }
@@ -312,7 +312,7 @@ async def test_service_idle_and_token(monkeypatch) -> None:
     )
     broker = Broker(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     await broker.poll_once()
-    (xtts,) = broker.nodes["dragon"].residents
+    (xtts,) = broker.nodes["rtx4060"].residents
     assert seen == ["Bearer k3y"]
     # The service's own idle time (900 s since its last request) beats the agent's (VRAM moved 2 s ago).
     assert xtts.idle_s == 900 and xtts.vram_mb == 1300

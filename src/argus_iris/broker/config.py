@@ -26,7 +26,7 @@ class NodeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_url: str
-    reserve_mb: int = 0  # memory iris never hands out (morpheus's desktop display)
+    reserve_mb: int = 0  # memory iris never hands out (rtx3090's desktop display)
     headroom_mb: int = DEFAULT_HEADROOM_MB  # CUDA contexts and estimates that run small
     gpu: int = 0  # NVML index on the host; one node is one GPU
 
@@ -52,8 +52,8 @@ class ServiceConfig(BaseModel):
     serves: list[str] = Field(default_factory=list)
     # Container name on the node, to match the agent's GPU processes to this service (and, later, to warm it).
     container: str | None = None
-    # argus-http lifecycle routes, named as in argus-cortex's TenantResident (the contract of voluptas#22 and
-    # agent-composer#44). unload frees VRAM and RAM; evict moves GPU -> CPU where the service has a CPU stage.
+    # argus-http lifecycle routes, named as in argus-cortex's TenantResident (the resident
+    # contract). unload frees VRAM and RAM; evict moves GPU -> CPU where the service has a CPU stage.
     health_path: RoutePath = "/health"
     unload_path: RoutePath | None = "/admin/unload"
     evict_path: RoutePath | None = None
@@ -151,7 +151,7 @@ class BrokerConfig(BaseModel):
     # A resident of the request's own class is evicted only once it has been idle, and loaded, this long: so two
     # tenants of one class cannot ping-pong a card between their models.
     admission_same_class_idle_s: float = Field(300.0, ge=0)
-    # Resident ids (fnmatch patterns) admission never evicts, e.g. "dragon/ollama-dragon/hf.co/inclusionAI/SingGuard-*".
+    # Resident ids (fnmatch patterns) admission never evicts, e.g. "rtx4060/ollama-rtx4060/hf.co/inclusionAI/SingGuard-*".
     # The policy file of rollout step 4 adds windows; this is the always-pinned part.
     pinned: list[str] = Field(default_factory=list)
     # A granted lease that keeps heartbeating but shows no GPU activity this long (its resident never busy or used,

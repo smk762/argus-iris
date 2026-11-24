@@ -1,5 +1,4 @@
-# argus-iris broker, on morpheus. `docker compose -f deploy/broker.compose.yaml up -d`
-# (a2f holds :8110 on morpheus, hence 8120.)
+# argus-iris broker, on one host. `docker compose -f deploy/broker.compose.yaml up -d`
 services:
   argus-iris:
     image: ghcr.io/smk762/argus-iris:${IRIS_TAG:-latest}
@@ -14,7 +13,7 @@ services:
       argus.health: /health
       argus.port: "8120"
     ports:
-      - "${HOST_IP:-0.0.0.0}:8120:8120"
+      - "${HOST_IP:-127.0.0.1}:8120:8120"
     volumes:
       - ${IRIS_CONFIG_FILE:-./iris.yaml}:/etc/argus-iris/iris.yaml:ro
       # Residency policy. The default is the shipped example, which only reports (no rule enforces).
