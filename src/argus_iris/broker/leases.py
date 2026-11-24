@@ -13,8 +13,9 @@ with ``lease_stall_reclaim`` it is ended ``refused`` once it has ignored that fo
 keepalive's ``resume`` cannot re-grant it.
 
 **Placement** follows the target. A service target (``ollama:<model>``, ``comfyui``) goes to the services that serve
-it, in config order (``ollama-dragon`` before ``ollama-jarrah``), a node where the model is already resident first,
-services that are down last. ``in-process`` goes to the constrained node, the tenant's own node, or any node that
+it: up before down, then the one serving fewest granted leases, then one where the model is already resident, then
+config order (``ollama-rtx4060`` before ``ollama-gtx1070``). An Ollama that lists its pulled models and lacks this one
+is skipped, unless none has it. ``in-process`` goes to the constrained node, the tenant's own node, or any node that
 meets ``min_cc`` and ``bf16``.
 
 **Admission** has two modes (``admission`` in the broker config):
@@ -22,14 +23,14 @@ meets ``min_cc`` and ``bf16``.
 - ``observe`` (the default): every request is granted at once on the first candidate. Each grant records whether it
   would have fit (``fits``), so footprints and waits come from real leases before admission acts on them.
 - ``enforce``: a lease is granted on the first candidate where it fits (DESIGN.md's inequality, see :func:`_fit`),
-  so a full dragon spills to jarrah. Where none fits, iris plans an eviction on a candidate (idle residents, least
+  so a full rtx4060 spills to gtx1070. Where none fits, iris plans an eviction on a candidate (idle residents, least
   recently used first, never busy, pinned, under a live lease, or of a higher class than the request) and grants once
   the agent sees the memory back; with nothing to evict the lease waits, queued. One that could never fit on any
   candidate is refused. The queue is served by class, with a wait bonus so nothing starves, and the head's
   reservation is kept: a lower lease is granted on that node only beside it.
 
 **Eviction plans** avoid thrash and evict as little as they can. A resident of the request's own class may be
-evicted (jarrah's "one model fills the card, keep it moving" needs it), but only once it has been idle, and loaded,
+evicted (gtx1070's "one model fills the card, keep it moving" needs it), but only once it has been idle, and loaded,
 for ``admission_same_class_idle_s`` (300 s; lower classes need only ``admission_min_idle_s``), so two tenants of one
 class cannot ping-pong a card. Lower classes go first, then the longest idle; victims the shortfall does not need are
 dropped; and across candidate nodes the cheapest plan wins (fewest same-class victims, then fewest MB evicted).
@@ -46,9 +47,10 @@ import contextlib
 import fnmatch
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Literal
 
 import structlog
 from argus_cortex.gpu_wire import (
@@ -71,7 +73,7 @@ from pydantic import BaseModel
 
 from argus_iris.broker.config import BrokerConfig
 from argus_iris.broker.policy import Policy
-from argus_iris.models import NodeState, Resident, ResidentSource, utcnow
+from argus_iris.models import NodeState, Resident, ResidentSource, ServiceState, utcnow
 
 log = structlog.get_logger("argus_iris.leases")
 
@@ -116,6 +118,11 @@ class LeaseRecord(BaseModel):
     resumed: bool = False
     heartbeats: int = 0
     peak_vram_mb: int | None = None
+    # Where peak_vram_mb came from (#39). "client": the caller reported it (heartbeat or release), and that wins.
+    # "broker": the caller sent none, so iris filled it, for an in-process lease, with the most its tenant's own
+    # process residents held on the node while the lease was granted. That is the process total: with several
+    # processes or several concurrent leases of one tenant on the node, each lease shows the whole, not a share.
+    peak_source: Literal["client", "broker"] | None = None
     progress: float | None = (
         None  # 0-1, from the caller's heartbeat (cortex lease_version 1.1); a change counts as activity
     )
@@ -169,9 +176,11 @@ class Candidate:
 
 
 def _model_key(name: str | None) -> str | None:
-    """Ollama lists ``nomic-embed-text`` as ``nomic-embed-text:latest``; compare the two as one."""
+    """A model as Ollama resolves it, for comparison only: ``:latest`` implied, and case-insensitive (Ollama serves
+    ``Qwen2.5:7b`` to a request for ``qwen2.5:7b``)."""
     if not name:
         return None
+    name = name.lower()
     return name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest"
 
 
@@ -200,6 +209,24 @@ def _new_mb(rec: LeaseRecord, state: NodeState) -> int:
     return rec.working_mb + (0 if loaded else (rec.model_mb or 0))
 
 
+def _own_credit(rec: LeaseRecord, state: NodeState, granted: list[LeaseRecord]) -> int:
+    """VRAM *rec*'s tenant already holds on the node in its own processes, less what its other granted leases there
+    claim (#36). An in-process lease runs in that process, so what the process holds (a loaded model, an allocator
+    arena) is part of the footprint the lease asks for, not something it competes with."""
+    if rec.target != IN_PROCESS:
+        return 0
+    own = sum(r.vram_mb for r in state.residents if r.source == ResidentSource.PROCESS and r.tenant == rec.tenant)
+    if not own:
+        return 0
+    others = sum(o.vram_mb for o in granted if o.tenant == rec.tenant and o.node == state.name and o is not rec)
+    return max(0, own - others)
+
+
+def _need(rec: LeaseRecord, state: NodeState, granted: list[LeaseRecord]) -> int:
+    """What *rec* adds on top of the node's ledger: :func:`_new_mb` less its tenant's own held memory."""
+    return max(0, _new_mb(rec, state) - _own_credit(rec, state, granted))
+
+
 def _fit(
     node: str, state: NodeState | None, rec: LeaseRecord, granted: list[LeaseRecord], reserved: int = 0
 ) -> tuple[bool | None, int | None]:
@@ -210,9 +237,9 @@ def _fit(
     """
     if state is None or state.ledger is None:
         return None, None
-    held = sum(_new_mb(o, state) for o in granted if o.node == node and o is not rec)
+    held = sum(_need(o, state, granted) for o in granted if o.node == node and o is not rec)
     admissible = max(0, state.ledger.admissible_mb - held - reserved)
-    return _new_mb(rec, state) <= admissible, admissible
+    return _need(rec, state, granted) <= admissible, admissible
 
 
 def _capacity(state: NodeState | None, config: BrokerConfig, node: str) -> int | None:
@@ -224,9 +251,18 @@ def _capacity(state: NodeState | None, config: BrokerConfig, node: str) -> int |
 
 
 def candidates(
-    rec: LeaseRecord, constraints: GpuConstraints, home: str | None, config: BrokerConfig, nodes: dict[str, NodeState]
+    rec: LeaseRecord,
+    constraints: GpuConstraints,
+    home: str | None,
+    config: BrokerConfig,
+    nodes: dict[str, NodeState],
+    load: Mapping[str, int] | None = None,
 ) -> tuple[list[Candidate], str | None]:
-    """Where *rec* could run, best first, or ``([], why)`` when nowhere."""
+    """Where *rec* could run, best first, or ``([], why)`` when nowhere.
+
+    *load* counts the granted leases on each service: of two that are up and have the model, the one serving fewer
+    goes first, ahead of the one that has it loaded already (a load costs seconds, waiting behind a job far more).
+    """
     wanted = constraints.node
     if rec.target == IN_PROCESS:
         names = [wanted] if wanted else ([home] if home else list(config.nodes))
@@ -237,19 +273,31 @@ def candidates(
         return [Candidate(n, config.nodes[n].gpu) for n in names], None
 
     name = target_service(rec.target)
-    services = [s for s in config.services if name in (s.id, s.adapter)]
+    services = [s for s in config.services if s.answers(name)]
     services = [s for s in services if (not wanted or s.node == wanted) and _meets(nodes.get(s.node), constraints)]
     if not services:
         return [], f"no configured service serves {rec.target}" + (f" on {wanted}" if wanted else "")
     model = _model_key(target_model(rec.target))
+    load = load or {}
 
-    def order(svc) -> tuple[bool, bool]:
-        state = nodes.get(svc.node)
-        up = bool(state and any(s.id == svc.id and s.up for s in state.services))
+    def state_of(svc) -> ServiceState | None:
+        node = nodes.get(svc.node)
+        return next((s for s in node.services if s.id == svc.id), None) if node else None
+
+    def lacks(svc) -> bool:
+        """The service says which models it has pulled, and this is not one of them."""
+        st = state_of(svc)
+        return bool(model and st and st.available is not None and model not in {_model_key(m) for m in st.available})
+
+    if model and not all(lacks(s) for s in services):  # none has it: leave them all, the caller may mean to pull
+        services = [s for s in services if not lacks(s)]
+
+    def order(svc) -> tuple[bool, int, bool]:
+        state, st = nodes.get(svc.node), state_of(svc)
         warm = bool(
             model and state and any(r.service == svc.id and _model_key(r.model) == model for r in state.residents)
         )
-        return (not up, not warm)  # stable sort keeps config order within each group
+        return (not (st and st.up), load.get(svc.id, 0), not warm)  # stable sort keeps config order within a group
 
     services.sort(key=order)
     return [Candidate(s.node, config.nodes[s.node].gpu, s.base_url, s.id) for s in services], None
@@ -409,6 +457,7 @@ class LeaseBook:
             manifest.node if manifest else None,
             self.config,
             self._nodes(),
+            Counter(self._services.get(o.lease_id) for o in self._granted()),
         )
 
     def _granted(self) -> list[LeaseRecord]:
@@ -494,7 +543,7 @@ class LeaseBook:
 
         caps = [_capacity(nodes.get(c.node), self.config, c.node) for c in cands]
         if all(cap is not None for cap in caps) and all(
-            _new_mb(rec, nodes[c.node]) > cap for c, cap in zip(cands, caps, strict=True)
+            _need(rec, nodes[c.node], granted) > cap for c, cap in zip(cands, caps, strict=True)
         ):
             self._end(
                 rec, "refused", now, reason=f"needs {rec.vram_mb} MB; the most any candidate offers is {max(caps)} MB"
@@ -505,7 +554,7 @@ class LeaseBook:
         for i, c in enumerate(cands):
             state = nodes[c.node]
             _, admissible = _fit(c.node, state, rec, granted, reserved[c.node])
-            short = _new_mb(rec, state) - (admissible or 0)
+            short = _need(rec, state, granted) - (admissible or 0)
             victims = self._plan(rec, c, state, short, granted, now)
             if victims:
                 same = sum(1 for v in victims if self._class_of(v) == rec.priority)
@@ -521,13 +570,20 @@ class LeaseBook:
             self._evict(rec.lease_id, ids)
             return
 
-        first = cands[0]
+        def still_short(c: Candidate) -> int:
+            """What the node would still lack once the leases granted on it are released: wait where that frees it."""
+            state = nodes[c.node]
+            _, admissible = _fit(c.node, state, rec, granted, reserved[c.node])
+            held = sum(_need(o, state, granted) for o in granted if o.node == c.node)
+            return max(0, _need(rec, state, granted) - (admissible or 0) - held)
+
+        first = min(cands, key=still_short)  # ties keep placement order
         _, admissible = _fit(first.node, nodes.get(first.node), rec, granted, reserved[first.node])
         rec.node = first.node
         reserved[first.node] += rec.vram_mb  # the head's reservation: nothing lower takes this node's memory
         self._say(
             rec,
-            f"waiting for {_new_mb(rec, nodes[first.node]) - (admissible or 0)} MB on {first.node}: "
+            f"waiting for {_need(rec, nodes[first.node], granted) - (admissible or 0)} MB on {first.node}: "
             + ("nothing idle to evict" if self._evict is not None else "eviction is off"),
         )
 
@@ -540,6 +596,13 @@ class LeaseBook:
         """A resident takes the class of the last lease that used it; background if none has."""
         return self._last_class.get((r.node, _model_key(r.model) or r.service), "background")
 
+    def _stoppable(self, r: Resident) -> bool:
+        """An external resident admission may stop: ``evict_by: stop``, and a policy rule matching it enforced. A
+        stop takes the whole service away (its clients fall back), so it is opted into per resident, observe first."""
+        svc = next((s for s in self.config.services if s.id == r.service and s.node == r.node), None)
+        rule = self.policy.rule_for(r)
+        return bool(svc and svc.evict_by == "stop" and rule and rule[1].enforce)
+
     def _plan(
         self,
         rec: LeaseRecord,
@@ -551,8 +614,9 @@ class LeaseBook:
     ) -> list[Resident] | None:
         """The fewest residents on *where* whose eviction frees *short* MB, or None if no set can.
 
-        Eligible: idle long enough, not busy, pinned, under a live lease, being evicted, recently failed, already
-        unloaded, the model asked for, or of a higher class than the request. A same-class resident must also have
+        Eligible: freeable (through an adapter, or an external service iris may stop: :meth:`_stoppable`), idle long
+        enough, and not busy, pinned, under a live lease, being evicted, recently failed, already unloaded, the model
+        asked for, or of a higher class than the request. A same-class resident must also have
         been idle, and loaded, for ``admission_same_class_idle_s``. Lower classes are taken first, then the longest
         idle; then any victim the rest already cover is dropped.
         """
@@ -563,7 +627,7 @@ class LeaseBook:
             s.id
             for o in here
             for s in self.config.services_on(where.node)
-            if target_service(o.target) in (s.id, s.adapter)
+            if s.id == self._services.get(o.lease_id) or s.answers(target_service(o.target))
         }
         wanted = _model_key(target_model(rec.target))
         mine = _rank(rec.priority)
@@ -574,6 +638,8 @@ class LeaseBook:
             theirs = _rank(self._class_of(r))
             if (
                 r.source == ResidentSource.PROCESS  # no adapter to evict it
+                or (r.tenant is not None and r.tenant == rec.tenant)  # the tenant's own: evicting it is self-defeating
+                or (r.source == ResidentSource.EXTERNAL and not self._stoppable(r))
                 or r.busy
                 or r.idle_s is None
                 or r.idle_s < self.config.admission_min_idle_s
@@ -648,7 +714,7 @@ class LeaseBook:
         now = self._clock()
         shown = (rec.peak_vram_mb, rec.progress, rec.stage)
         if hb.peak_vram_mb is not None:
-            rec.peak_vram_mb = max(rec.peak_vram_mb or 0, hb.peak_vram_mb)
+            _client_peak(rec, hb.peak_vram_mb)
         # getattr: cortex before lease_version 1.1 has no progress on Heartbeat.
         if (progress := getattr(hb, "progress", None)) is not None:
             rec.progress = progress
@@ -680,7 +746,9 @@ class LeaseBook:
         if rec is None:
             return None
         if rel.peak_vram_mb is not None:
-            rec.peak_vram_mb = max(rec.peak_vram_mb or 0, rel.peak_vram_mb)
+            _client_peak(rec, rel.peak_vram_mb)
+        elif rec.state == "granted":
+            self._sample_own(rec)  # the last poll's figure, in case the lease was shorter than a tick
         if rec.active:
             rec.outcome, rec.detail = rel.outcome, rel.detail
             reason = "cancelled while queued" if rec.state == "queued" else None
@@ -706,12 +774,33 @@ class LeaseBook:
                 self._end(rec, "expired", now, reason=why)
             elif rec.state == "granted":
                 self._watch(rec, now)
+                if rec.state == "granted" and self._sample_own(rec) and self._on_change is not None:
+                    self._on_change(rec)  # the dashboard only, like a heartbeat's figures
             elif not rec.active and rec.ended_at and (now - rec.ended_at).total_seconds() > RETAIN_S:
                 self._forget(rec)
         for lid, when in list(self._reclaimed.items()):
             if (now - when).total_seconds() > 24 * 3600:
                 del self._reclaimed[lid]
         self._serve_queue(now)
+
+    # --- footprint ---------------------------------------------------------------------------------------------
+
+    def _sample_own(self, rec: LeaseRecord) -> bool:
+        """Raise a granted in-process lease's broker peak to what its tenant's own processes hold now (#39).
+
+        A containerised client cannot read its own VRAM (NVML lists host PIDs), so iris, which sees them, fills in.
+        Never over a client figure. True when the figure changed.
+        """
+        if rec.target != IN_PROCESS or rec.node is None or rec.peak_source == "client":
+            return False
+        state = self._nodes().get(rec.node)
+        if state is None or not state.reachable:
+            return False
+        own = sum(r.vram_mb for r in state.residents if r.source == ResidentSource.PROCESS and r.tenant == rec.tenant)
+        if not own or own <= (rec.peak_vram_mb or 0):
+            return False
+        rec.peak_vram_mb, rec.peak_source = own, "broker"
+        return True
 
     # --- stalls --------------------------------------------------------------------------------------------------
 
@@ -793,6 +882,7 @@ class LeaseBook:
             outcome=rec.outcome,
             held_s=held,
             peak_vram_mb=rec.peak_vram_mb,
+            peak_source=rec.peak_source,
             reason=rec.reason,
         )
         self._changed(rec)
@@ -839,6 +929,25 @@ class LeaseBook:
     def _resident_key(r: Resident) -> str:
         return _model_key(r.model) or r.service
 
+    def tenant_of(self, r: Resident) -> str | None:
+        """The tenant *r* belongs to (#36): its container matches a ``tenants`` entry in the broker config, or it is a
+        process whose compose service is named after a tenant iris knows (registered, configured, or leasing)."""
+        container = r.detail.get("container")
+        if container is None and r.source != ResidentSource.PROCESS:
+            svc = next((s for s in self.config.services if s.id == r.service and s.node == r.node), None)
+            container = svc.container if svc else None
+        if container:
+            for name, t in self.config.tenants.items():
+                if any(fnmatch.fnmatchcase(container, pat) for pat in t.containers):
+                    return name
+        if r.source == ResidentSource.PROCESS and (
+            r.service in self.tenants
+            or r.service in self.config.tenants
+            or any(o.tenant == r.service for o in self.leases.values() if o.active)
+        ):
+            return r.service
+        return None
+
     def in_use(self, r: Resident) -> bool:
         """A granted lease is using *r* now (its model, or its service for a target with no model)."""
         key = self._resident_key(r)
@@ -850,6 +959,14 @@ class LeaseBook:
 
     def active(self, node: str | None = None) -> list[LeaseRecord]:
         return [r for r in self.leases.values() if r.active and (node is None or r.node == node)]
+
+
+def _client_peak(rec: LeaseRecord, mb: int) -> None:
+    """Record a caller's own peak (#39): it replaces a broker estimate, and only grows after that."""
+    if rec.peak_source != "client":
+        rec.peak_vram_mb, rec.peak_source = mb, "client"
+    else:
+        rec.peak_vram_mb = max(rec.peak_vram_mb or 0, mb)
 
 
 def _merge(base: GpuConstraints, over: GpuConstraints) -> GpuConstraints:

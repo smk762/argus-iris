@@ -19,6 +19,9 @@ from pathlib import Path
 
 import structlog
 from argus_cortex.gpu_wire import (
+    LEASE_VERSION,
+    RESIDENT_VERSION,
+    TENANT_VERSION,
     Heartbeat,
     HeartbeatReply,
     LeaseRelease,
@@ -27,17 +30,20 @@ from argus_cortex.gpu_wire import (
     TenantManifest,
 )
 from argus_cortex.server import WriteGuard, cross_site_refuse
+from argus_cortex.service import DIRECTORY_VERSION, DependencyCheck, DirectoryEntry, PeerLookup, install_health
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
+from pydantic import BaseModel, Field
 
 import argus_iris
 from argus_iris.broker.actions import ActionError, EvictMode, EvictResult, WarmResult, evict_resident, warm_service
 from argus_iris.broker.config import BrokerConfig, load_config
 from argus_iris.broker.leases import LeaseConflict, LeaseRecord
 from argus_iris.broker.policy import Policy, load_policy
+from argus_iris.broker.registry import RegistrationError
 from argus_iris.broker.state import Broker
 from argus_iris.models import NodeState, Resident
 
@@ -46,6 +52,15 @@ log = structlog.get_logger("argus_iris.server")
 SSE_KEEPALIVE_S = 15.0
 MAX_WAIT_S = 60.0  # longest a GET /leases/{id} is held; the client asks for 20 s
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
+
+
+class NodeAnnouncement(BaseModel):
+    """An agent's ``POST /nodes``: its node name, and where the broker reaches it (else the address it called from)."""
+
+    name: str = Field(max_length=63)
+    agent_url: str | None = Field(None, max_length=300)
+    port: int = Field(9110, ge=1, le=65535)
+    gpu: int = Field(0, ge=0, le=63)
 
 
 class _BrokerCollector:
@@ -72,6 +87,17 @@ class _BrokerCollector:
             "iris_service_up", "1 when the service's adapter read succeeded", labels=["node", "service"]
         )
         queue = GaugeMetricFamily("iris_service_queue", "Service queue depth", labels=["node", "service", "state"])
+        pinned = GaugeMetricFamily("iris_node_vram_pinned_mb", "VRAM held by pinned residents", labels=["node"])
+        held = GaugeMetricFamily(
+            "iris_node_vram_held_mb",
+            "VRAM admission can never free: pins, unmanaged processes, residues",
+            labels=["node"],
+        )
+        crowded = GaugeMetricFamily(
+            "iris_service_crowded_out",
+            "1 when what the node can never free leaves less room than the service needs",
+            labels=["node", "service"],
+        )
         for state in self.broker.nodes.values():
             up.add_metric([state.name], 1.0 if state.reachable else 0.0)
             if state.ledger:
@@ -79,6 +105,8 @@ class _BrokerCollector:
                 free.add_metric([state.name], state.ledger.free_mb)
                 admissible.add_metric([state.name], state.ledger.admissible_mb)
                 unattributed.add_metric([state.name], state.ledger.unattributed_mb)
+                pinned.add_metric([state.name], state.ledger.pinned_mb)
+                held.add_metric([state.name], state.ledger.held_mb)
             if state.host:
                 ram.add_metric([state.name], state.host.available_mb)
             for r in state.residents:
@@ -88,6 +116,8 @@ class _BrokerCollector:
                     ridle.add_metric(labels, r.idle_s)
             for s in state.services:
                 svc_up.add_metric([s.node, s.id], 1.0 if s.up else 0.0)
+                if s.need_mb:
+                    crowded.add_metric([s.node, s.id], 1.0 if s.crowded_out else 0.0)
                 if s.queue_running is not None:
                     queue.add_metric([s.node, s.id, "running"], s.queue_running)
                 if s.queue_pending is not None:
@@ -149,7 +179,7 @@ class _BrokerCollector:
             residency.add_metric([node, action, outcome], n)
         tenants = GaugeMetricFamily("iris_tenants", "Tenants that registered a manifest")
         tenants.add_metric([], len(self.broker.leases.tenants))
-        yield from (up, total, free, admissible, unattributed, ram, rvram, ridle, svc_up, queue)
+        yield from (up, total, free, admissible, unattributed, ram, pinned, held, rvram, ridle, svc_up, queue, crowded)
         yield from (leases, lease_mb, unfit, stalled, ended, evictions, residency, tenants)
 
 
@@ -179,17 +209,42 @@ def create_app(
     app.add_middleware(WriteGuard, refuse=cross_site_refuse(config.trusted_origins))
     app.state.broker = broker
 
-    @app.get("/health")
-    async def health() -> dict:
-        agents = {name: s.reachable for name, s in broker.nodes.items()}
+    # /health is argus-cortex's ServiceHealth, with the broker's own fields beside it. `status` keeps its meaning:
+    # degraded while an agent is unreachable, read from the broker's last poll (so never cached: ttl 0), and never
+    # 503, since the broker has no loading phase.
+    async def agents_reachable() -> DependencyCheck:
+        down = sum(not s.reachable for s in broker.nodes.values())
+        return DependencyCheck(ok=not down, detail=f"{down} of {len(broker.nodes)} unreachable" if down else None)
+
+    def own_health() -> dict:
         return {
-            "status": "ok" if all(agents.values()) else "degraded",
-            "version": argus_iris.__version__,
             "mode": "observe-only" if config.admission == "observe" else "admission",
             "polls": broker.polls,
             "leases": {"active": len(broker.leases.active()), "tenants": len(broker.leases.tenants)},
-            "agents": agents,
+            "agents": {name: s.reachable for name, s in broker.nodes.items()},
+            "pins_missing": broker.residency.missing_pins(),
+            "crowded_out": broker.crowded(),
+            "registered": {
+                "tenants": len(broker.registry.tenants),
+                "services": len(broker.registry.services),
+                "nodes": len(broker.registry.announced),
+            },
         }
+
+    install_health(
+        app,
+        service="argus-iris",
+        version=argus_iris.__version__,
+        wire={
+            "lease_version": LEASE_VERSION,
+            "tenant_version": TENANT_VERSION,
+            "resident_version": RESIDENT_VERSION,
+            "directory_version": DIRECTORY_VERSION,
+        },
+        checks={"agents": agents_reachable},
+        extra=own_health,
+        check_ttl_s=0,
+    )
 
     @app.get("/nodes", response_model=list[NodeState])
     async def nodes() -> list[NodeState]:
@@ -270,10 +325,118 @@ def create_app(
         return rec.status(leases.position(rec))
 
     @app.post("/tenants")
-    async def register_tenant(manifest: TenantManifest, authorization: str | None = Header(default=None)) -> dict:
+    async def register_tenant(
+        manifest: TenantManifest,
+        authorization: str | None = Header(default=None),
+        x_argus_admin_token: str | None = Header(default=None),
+        x_argus_container_id: str | None = Header(default=None),
+    ) -> dict:
+        """Register (or renew) a tenant's manifest. Its residents become services once an agent reports their
+        containers; ``X-Argus-Admin-Token`` is what iris sends to those services' admin routes (``admin_auth``)."""
         check_caller(authorization, required=False)
         changed = leases.register(manifest)
-        return {"tenant": manifest.tenant, "kinds": [k.kind for k in manifest.kinds], "changed": changed}
+        registered = broker.registry.register(manifest, token=x_argus_admin_token, container_id=x_argus_container_id)
+        if registered:
+            broker.reconcile()
+        placed = [p for p in broker.registry.describe_tenants() if p["tenant"] == manifest.tenant]
+        return {
+            "tenant": manifest.tenant,
+            "kinds": [k.kind for k in manifest.kinds],
+            "changed": changed or registered,
+            "placements": placed[0]["placements"] if placed else [],
+        }
+
+    @app.delete("/tenants/{tenant}")
+    async def forget_tenant(
+        tenant: str,
+        purge: bool = False,
+        authorization: str | None = Header(default=None),
+        x_argus_container_id: str | None = Header(default=None),
+    ) -> dict:
+        """A tenant signs off (cortex's client, on shutdown): its registration lapses now, and its services stay while
+        their containers exist, since iris may be the one that stopped them. ``purge=true`` (the dashboard's Forget)
+        drops the registration, its services and its manifest at once; a client still running registers again on
+        its next renewal."""
+        check_caller(authorization, required=False)
+        known = broker.registry.forget(tenant, purge=purge, container_id=x_argus_container_id)
+        if purge:
+            known = leases.tenants.pop(tenant, None) is not None or known
+        if not known:
+            raise HTTPException(404, f"no tenant {tenant!r}")
+        broker.reconcile()
+        return {"tenant": tenant, "forgotten": purge, "lapsed": not purge}
+
+    @app.get("/registry")
+    async def show_registry() -> dict:
+        """Registered tenants (where each resident landed, or why not) and every node with where it came from."""
+        return {"tenants": broker.registry.describe_tenants(), "nodes": broker.registry.describe_nodes()}
+
+    @app.get("/services")
+    async def services() -> list[dict]:
+        """Every service iris reads: from the config file (``origin: config``) or a tenant's manifest (``tenant``)."""
+        return broker.registry.describe_services()
+
+    # --- service directory (#48): containers labelled argus.peer, read-only ------------------------------------
+
+    @app.get("/directory", response_model=list[DirectoryEntry])
+    async def directory() -> list[DirectoryEntry]:
+        """Every labelled service on every node (and the config's peers): where it is reached and what its health
+        says. Read-only, like /services."""
+        return broker.directory.entries
+
+    @app.get("/directory/sd")
+    async def directory_sd() -> list[dict]:
+        """Prometheus ``http_sd_configs`` target groups, one per reachable service (labels argus_peer, argus_service,
+        node, container, argus_health_path)."""
+        return broker.directory.service_discovery()
+
+    @app.get("/directory/{peer}", response_model=PeerLookup)
+    async def lookup_peer(peer: str, authorization: str | None = Header(default=None)) -> PeerLookup:
+        """Where to reach *peer*, best first (argus-cortex#207). This decides where a caller sends its work (a
+        moderation check, say), so it answers only when the broker has a caller token, and only to a caller that
+        presents it: with no token, POST /tenants is open to the LAN."""
+        check_caller(authorization, required=True)
+        found = broker.directory.lookup(peer)
+        if found is None or not found.urls:  # a name no peer can have is "not found" too, as cortex's client reads it
+            raise HTTPException(404, f"no reachable peer {peer!r}")
+        return found
+
+    @app.post("/nodes")
+    async def announce_node(
+        body: NodeAnnouncement, request: Request, authorization: str | None = Header(default=None)
+    ) -> dict:
+        """An agent announces its node. Authenticated with the agent token, so only an agent that already holds the
+        secret the broker sends to agents can add one."""
+        token = os.environ.get(config.agent_token_env, "")
+        if not token:
+            raise HTTPException(403, f"node announcements are disabled: {config.agent_token_env} is not set")
+        scheme, _, presented = (authorization or "").partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(presented.encode(), token.encode()):
+            raise HTTPException(401, "bad or missing agent token", headers={"WWW-Authenticate": "Bearer"})
+        url = body.agent_url
+        if not url:
+            host = request.client.host if request.client else None
+            if not host:
+                raise HTTPException(422, "no agent_url, and the caller's address is unknown")
+            url = f"http://[{host}]:{body.port}" if ":" in host else f"http://{host}:{body.port}"
+        try:
+            status = broker.registry.announce(body.name, url, body.gpu)
+        except RegistrationError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if status in ("added", "changed"):
+            broker.reconcile()
+        return {"node": body.name, "status": status, "agent_url": config.nodes[body.name].agent_url}
+
+    @app.delete("/nodes/{name}")
+    async def forget_node(name: str, authorization: str | None = Header(default=None)) -> dict:
+        """Forget an announced node (a host taken out of service). Configured nodes stay: edit the config file."""
+        check_caller(authorization, required=True)
+        if name in broker.registry.configured_nodes:
+            raise HTTPException(409, f"node {name!r} is in the config file")
+        if not broker.registry.forget_node(name):
+            raise HTTPException(404, f"no announced node {name!r}")
+        broker.reconcile()
+        return {"node": name, "forgotten": True}
 
     @app.get("/tenants", response_model=list[TenantManifest])
     async def tenants() -> list[TenantManifest]:
@@ -333,7 +496,11 @@ def create_app(
 
     @app.get("/config")
     async def show_config() -> dict:
-        return json.loads(config.model_dump_json())
+        """The config file as loaded: registered services and announced nodes are on /services and /registry."""
+        shown = config.model_copy(
+            update={"services": broker.registry.configured, "nodes": broker.registry.configured_nodes}
+        )
+        return json.loads(shown.model_dump_json())
 
     # The dashboard: static files shipped in the package, a thin client over the routes above. Same origin, so its
     # warm POST passes the WriteGuard without a trusted_origins entry; the bearer token is still required.

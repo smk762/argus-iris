@@ -10,25 +10,25 @@ from argus_iris.broker.state import Broker
 from argus_iris.server.app import create_app
 
 CONFIG = {
-    "nodes": {"morpheus": {"agent_url": "http://morpheus:9110"}},
+    "nodes": {"rtx3090": {"agent_url": "http://rtx3090:9110"}},
     "services": [
         {
             "id": "comfyui",
-            "node": "morpheus",
+            "node": "rtx3090",
             "adapter": "comfyui",
-            "base_url": "http://morpheus:8188",
-            "container": "voluptas_comfyui",
+            "base_url": "http://rtx3090:8188",
+            "container": "imagegen_comfyui",
         },
         {
             "id": "diffusers",
-            "node": "morpheus",
+            "node": "rtx3090",
             "adapter": "argus-http",
-            "base_url": "http://morpheus:8011",
-            "container": "voluptas_image_gen_diffusers",
+            "base_url": "http://rtx3090:8011",
+            "container": "imagegen_diffusers",
             "warm_path": "/admin/wake",
         },
-        {"id": "nocontainer", "node": "morpheus", "adapter": "argus-http", "base_url": "http://morpheus:9999"},
-        {"id": "ollama", "node": "morpheus", "adapter": "ollama", "base_url": "http://morpheus:11434"},
+        {"id": "nocontainer", "node": "rtx3090", "adapter": "argus-http", "base_url": "http://rtx3090:9999"},
+        {"id": "ollama", "node": "rtx3090", "adapter": "ollama", "base_url": "http://rtx3090:11434"},
     ],
     "warm_timeout_s": 1,
 }
@@ -40,7 +40,7 @@ class World:
     def __init__(
         self, *, comfy_up: bool = False, comes_back: bool = True, wake: tuple[int, dict] | None = None
     ) -> None:
-        self.up = {"voluptas_comfyui": comfy_up, "voluptas_image_gen_diffusers": False}
+        self.up = {"imagegen_comfyui": comfy_up, "imagegen_diffusers": False}
         self.comes_back = comes_back
         self.wake = wake or (200, {"status": "ready", "model_state": "gpu", "unloaded": None})
         self.calls: list[str] = []
@@ -48,19 +48,19 @@ class World:
     def handler(self, request: httpx.Request) -> httpx.Response:
         url, method = str(request.url), request.method
         self.calls.append(f"{method} {url} {request.headers.get('authorization', '')}".strip())
-        if url.startswith("http://morpheus:9110/containers/") and method == "POST":
+        if url.startswith("http://rtx3090:9110/containers/") and method == "POST":
             name = url.split("/")[4]
             if self.comes_back:
                 self.up[name] = True
             return httpx.Response(200, json={"container": name, "action": "start", "ok": True, "detail": "done"})
-        if url.startswith("http://morpheus:8188/"):
-            if not self.up["voluptas_comfyui"]:
+        if url.startswith("http://rtx3090:8188/"):
+            if not self.up["imagegen_comfyui"]:
                 raise httpx.ConnectError("refused")
             if url.endswith("/queue"):
                 return httpx.Response(200, json={"queue_running": [], "queue_pending": []})
             return httpx.Response(200, json={"devices": []})
-        if url.startswith("http://morpheus:8011/"):
-            if not self.up["voluptas_image_gen_diffusers"]:
+        if url.startswith("http://rtx3090:8011/"):
+            if not self.up["imagegen_diffusers"]:
                 raise httpx.ConnectError("refused")
             if method == "POST" and url.endswith("/admin/wake"):
                 return httpx.Response(self.wake[0], json=self.wake[1])
@@ -83,7 +83,7 @@ async def test_warm_starts_a_stopped_comfyui() -> None:
     world = World()
     result = await warm_service(broker_for(world), "comfyui", poll_s=0)
     assert result.started_container and result.up and not result.warmed
-    assert "POST http://morpheus:9110/containers/voluptas_comfyui/start Bearer agent-tok" in world.calls
+    assert "POST http://rtx3090:9110/containers/imagegen_comfyui/start Bearer agent-tok" in world.calls
 
 
 async def test_warm_leaves_a_running_service_alone() -> None:
@@ -97,7 +97,7 @@ async def test_warm_starts_then_calls_warm_path() -> None:
     world = World()
     result = await warm_service(broker_for(world), "diffusers", poll_s=0)
     assert result.started_container and result.warmed and result.up
-    assert any(c.startswith("POST http://morpheus:8011/admin/wake") for c in world.calls)
+    assert any(c.startswith("POST http://rtx3090:8011/admin/wake") for c in world.calls)
 
 
 async def test_warm_reports_a_service_that_never_answers() -> None:
@@ -168,8 +168,8 @@ def _full_node(broker: Broker, *, admissible_mb: int, held: dict[str, int]) -> N
     from argus_iris.models import NodeLedger, NodeState, Resident, ResidentSource
 
     state = NodeState(
-        name="morpheus",
-        agent_url="http://morpheus:9110",
+        name="rtx3090",
+        agent_url="http://rtx3090:9110",
         reachable=True,
         ledger=NodeLedger(
             total_mb=24000,
@@ -181,11 +181,11 @@ def _full_node(broker: Broker, *, admissible_mb: int, held: dict[str, int]) -> N
             admissible_mb=admissible_mb,
         ),
         residents=[
-            Resident(id=f"morpheus/{s}", node="morpheus", service=s, source=ResidentSource.ARGUS_HTTP, vram_mb=mb)
+            Resident(id=f"rtx3090/{s}", node="rtx3090", service=s, source=ResidentSource.ARGUS_HTTP, vram_mb=mb)
             for s, mb in held.items()
         ],
     )
-    broker._apply("morpheus", state)
+    broker._apply("rtx3090", state)
 
 
 async def test_warm_refused_when_the_node_cannot_admit_the_peak_seen() -> None:
@@ -219,3 +219,33 @@ async def test_warm_without_a_known_size_is_not_refused() -> None:
     broker = broker_for(World())
     _full_node(broker, admissible_mb=0, held={})
     assert (await warm_service(broker, "diffusers", poll_s=0)).warmed
+
+
+async def test_keep_alive_for_an_unknown_service_is_an_action_error() -> None:
+    from argus_iris.broker.actions import set_keep_alive
+    from argus_iris.models import Resident, ResidentSource
+
+    gone = Resident(
+        id="rtx3090/removed/x:1",
+        node="rtx3090",
+        service="removed",
+        source=ResidentSource.OLLAMA,
+        model="x:1",
+        vram_mb=1,
+    )
+    with pytest.raises(ActionError, match="unknown service 'removed'") as exc:
+        await set_keep_alive(broker_for(World()), gone, -1)
+    assert exc.value.status == 404
+
+
+@pytest.mark.parametrize("body", [b'["no"]', b'"no"', b"null"], ids=["list", "string", "null"])
+async def test_a_non_object_refusal_from_the_agent_is_an_action_error(body) -> None:
+    from argus_iris.broker.actions import container_action
+
+    broker = Broker(
+        BrokerConfig.model_validate(CONFIG),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(403, content=body))),
+    )
+    svc = next(s for s in broker.config.services if s.id == "comfyui")
+    with pytest.raises(ActionError, match="refused to stop imagegen_comfyui: HTTP 403"):
+        await container_action(broker, svc, "stop")

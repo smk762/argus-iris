@@ -7,11 +7,14 @@ idle-kill) and tenant manifests are later rollout steps and get their own files.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from argus_cortex.peers import PEER_NAME_PATTERN
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 DEFAULT_HEADROOM_MB = 512
 
@@ -23,7 +26,7 @@ class NodeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_url: str
-    reserve_mb: int = 0  # memory iris never hands out (morpheus's desktop display)
+    reserve_mb: int = 0  # memory iris never hands out (rtx3090's desktop display)
     headroom_mb: int = DEFAULT_HEADROOM_MB  # CUDA contexts and estimates that run small
     gpu: int = 0  # NVML index on the host; one node is one GPU
 
@@ -40,22 +43,43 @@ class ServiceConfig(BaseModel):
 
     id: str
     node: str
-    adapter: Literal["comfyui", "ollama", "argus-http"]
+    # external: a service outside the suite (Immich's ML server) read for up/down only, through health_path; its VRAM
+    # is attributed through `container` like any other.
+    adapter: Literal["comfyui", "ollama", "argus-http", "external"]
     base_url: str
+    # More lease target names this service answers (#40), beside its id and adapter: ``serves: [xtts]`` lets a lease
+    # for target ``xtts`` be placed on it too, so one target can have a service on each of several nodes.
+    serves: list[str] = Field(default_factory=list)
     # Container name on the node, to match the agent's GPU processes to this service (and, later, to warm it).
     container: str | None = None
-    # argus-http lifecycle routes, named as in argus-cortex's TenantResident (the contract of voluptas#22 and
-    # agent-composer#44). unload frees VRAM and RAM; evict moves GPU -> CPU where the service has a CPU stage.
+    # argus-http lifecycle routes, named as in argus-cortex's TenantResident (the resident
+    # contract). unload frees VRAM and RAM; evict moves GPU -> CPU where the service has a CPU stage.
     health_path: RoutePath = "/health"
     unload_path: RoutePath | None = "/admin/unload"
     evict_path: RoutePath | None = None
     warm_path: RoutePath | None = None
     # VRAM the service takes once warm. A manual warm is refused while the node cannot admit it; unset, iris uses the
-    # most it has seen the service hold since the broker started.
+    # most it has seen the service hold since the broker started. The crowded-out check (#40) takes the larger of the
+    # two, and the broker logs resident_over_warm_mb once when the service holds more than this.
     warm_mb: int | None = Field(default=None, ge=0)
     # Name of an environment variable holding a bearer token sent on every request to this service (rag-chat's
     # resident gateway needs one even for reads; ARGUS_ADMIN_TOKEN guards /admin/*). Never the token itself.
     token_env: str | None = None
+    # external only: how iris may free it. None: it cannot (observe only; an evict is refused). "stop": the node's
+    # agent stops the container (its own IRIS_AGENT_CONTAINERS allowlist still applies) and a warm starts it again.
+    # For a service whose clients fall back elsewhere when it is down (Immich to its CPU ML), so a stop costs speed,
+    # not an outage. Admission stops it only while a policy rule matching it says `enforce: true`.
+    evict_by: Literal["stop"] | None = None
+
+    @model_validator(mode="after")
+    def _check_evict_by(self) -> ServiceConfig:
+        if self.evict_by and (self.adapter != "external" or not self.container):
+            raise ValueError(f"{self.id}: evict_by needs adapter: external and a container")
+        return self
+
+    def answers(self, target: str | None) -> bool:
+        """A lease for service target *target* may be placed on this service."""
+        return target is not None and target in (self.id, self.adapter, *self.serves)
 
     def headers(self) -> dict[str, str]:
         token = os.environ.get(self.token_env, "") if self.token_env else ""
@@ -65,6 +89,40 @@ class ServiceConfig(BaseModel):
     @classmethod
     def _strip(cls, v: str) -> str:
         return v.rstrip("/")
+
+
+class RegisteredService(ServiceConfig):
+    """A service iris learned from a registered tenant manifest's resident, not from this file.
+
+    Its node and ``base_url`` are resolved from the node agents' container inventories, never taken from the caller:
+    the host is always the node's own agent host. It authenticates with the admin token its tenant sent when it
+    registered (``X-Argus-Admin-Token``), and only that: an operator's ``token_env`` is never sent to a host that
+    registered itself.
+    """
+
+    origin: Literal["tenant"] = "tenant"
+    tenant: str
+    resident: str  # the manifest resident's name
+    managed: bool | None = None  # the node's agent would start or restart its container; None: agent does not say
+    _token: str | None = PrivateAttr(default=None)
+
+    def headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._token}"} if self._token else {}
+
+    def with_token(self, token: str | None) -> RegisteredService:
+        self._token = token
+        return self
+
+
+class TenantConfig(BaseModel):
+    """A tenant's own processes on the GPU nodes (#36): what links a ``process`` resident to the tenant leasing for it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Container names (fnmatch) that run this tenant's work, e.g. ["argus-cull-argus-curator-1", "studio-rec-*"].
+    # Deployment-specific, so here rather than in the tenant manifest. A process resident whose compose service is
+    # the tenant's name is linked without an entry.
+    containers: list[str] = Field(default_factory=list)
 
 
 class BrokerConfig(BaseModel):
@@ -93,7 +151,7 @@ class BrokerConfig(BaseModel):
     # A resident of the request's own class is evicted only once it has been idle, and loaded, this long: so two
     # tenants of one class cannot ping-pong a card between their models.
     admission_same_class_idle_s: float = Field(300.0, ge=0)
-    # Resident ids (fnmatch patterns) admission never evicts, e.g. "dragon/ollama-dragon/hf.co/inclusionAI/SingGuard-*".
+    # Resident ids (fnmatch patterns) admission never evicts, e.g. "rtx4060/ollama-rtx4060/hf.co/inclusionAI/SingGuard-*".
     # The policy file of rollout step 4 adds windows; this is the always-pinned part.
     pinned: list[str] = Field(default_factory=list)
     # A granted lease that keeps heartbeating but shows no GPU activity this long (its resident never busy or used,
@@ -103,8 +161,47 @@ class BrokerConfig(BaseModel):
     # Also take the reservation back from a stalled lease that blocks a queued one (it ends refused, "reclaimed"),
     # once it has ignored the yield for lease_stall_s / 2 more.
     lease_stall_reclaim: bool = False
+    # Tenant name -> its own containers. Admission counts the VRAM a tenant's own process already holds toward that
+    # tenant's in-process leases, and never evicts a tenant's residents for its own lease (#36).
+    tenants: dict[str, TenantConfig] = Field(default_factory=dict)
     # How often the residency policy (IRIS_POLICY: idle-kill, keepalive, restart) is acted on.
     residency_s: float = Field(15.0, gt=0)
+    # Self-registration. A tenant's manifest residents become services once a node agent reports their container
+    # (node and published port found from its inventory), and agents that announce themselves (POST /nodes, with the
+    # agent token) become nodes. Entries in this file win over both.
+    register_services: bool = True
+    register_nodes: bool = True
+    # A registration not renewed this long is "lapsed": its services stay while their containers exist (a stopped
+    # container can still be warmed) and go once the container is removed. cortex's client renews every 300 s.
+    registration_ttl_s: float = Field(900.0, gt=0)
+    # Where registrations (manifests, the admin tokens they came with, announced nodes) are kept across restarts.
+    # IRIS_STATE_DIR overrides it; unset, they live in memory and clients re-register within registration_ttl_s.
+    state_dir: str | None = None
+    # Service directory (#48): containers labelled argus.peer on any node, read from the agents' inventories. Peers
+    # named here (e.g. a host with no iris agent) come first: config wins. Each name maps to one URL or several.
+    peers: dict[str, list[str]] = Field(default_factory=dict)
+    directory_health_s: float = Field(30.0, gt=0)  # how often each entry's /health is read
+    directory_probe_timeout_s: float = Field(3.0, gt=0, le=30)
+
+    @field_validator("peers", mode="before")
+    @classmethod
+    def _peer_lists(cls, v: object) -> object:
+        if isinstance(v, dict):
+            return {k: [u] if isinstance(u, str) else u for k, u in v.items()}
+        return v
+
+    @field_validator("peers")
+    @classmethod
+    def _peer_urls(cls, v: dict[str, list[str]]) -> dict[str, list[str]]:
+        for name, urls in v.items():
+            # The name callers ask for, as argus-cortex spells it: the directory's wire model refuses any other.
+            if len(name) > 100 or not re.fullmatch(PEER_NAME_PATTERN, name):
+                raise ValueError(f"peers.{name}: not a peer name (lowercase letters, digits and single hyphens)")
+            for url in urls:
+                parts = urlsplit(url)
+                if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
+                    raise ValueError(f"peers.{name}: {url!r} is not an http(s) URL with a host and no credentials")
+        return {name: [u.rstrip("/") for u in urls] for name, urls in v.items()}
 
     @model_validator(mode="after")
     def _check(self) -> BrokerConfig:

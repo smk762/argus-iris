@@ -59,6 +59,34 @@ class ContainerMemory(BaseModel):
     anon_mb: int  # cgroup memory.stat ``anon``: what restarting the container gives back
 
 
+class PortMap(BaseModel):
+    private: int  # the port inside the container
+    public: int | None = None  # the host port it is published on; None when it is not published
+    proto: str = "tcp"
+    # Host addresses it is published on ("0.0.0.0", "::", "127.0.0.1", a LAN address). Loopback only: no other host,
+    # the broker included, can reach it.
+    ips: list[str] = Field(default_factory=list)
+
+
+class ContainerEntry(BaseModel):
+    """One container on the agent's host, running or not: how the broker finds a registered tenant's resident (its
+    node and published port) without anyone writing it into the broker's config."""
+
+    id: str
+    name: str
+    service: str | None = None  # compose service label
+    project: str | None = None  # compose project label
+    running: bool
+    host_network: bool = False  # network_mode: host, so its ports are the host's own
+    ports: list[PortMap] = Field(default_factory=list)
+    # The agent would start, stop or restart it: on IRIS_AGENT_CONTAINERS, or labelled argus.iris.manage=true where
+    # the agent opted in to the label (IRIS_AGENT_MANAGE_LABEL).
+    managed: bool = False
+    # Its argus.* labels only (argus.peer, argus.service, argus.health, argus.port: the service directory, #48).
+    # Other labels can hold anything, so they never leave the host.
+    labels: dict[str, str] = Field(default_factory=dict)
+
+
 class NodeSnapshot(BaseModel):
     version: str = SNAPSHOT_VERSION
     node: str
@@ -69,6 +97,8 @@ class NodeSnapshot(BaseModel):
     host: HostMemory | None = None
     containers: list[ContainerMemory] = Field(default_factory=list)
     nvml_error: str | None = None
+    # Every container on the host. None from an agent too old to list them (or while Docker is unreachable).
+    inventory: list[ContainerEntry] | None = None
 
 
 class ContainerAction(StrEnum):
@@ -91,6 +121,7 @@ class ResidentSource(StrEnum):
     COMFYUI = "comfyui"
     OLLAMA = "ollama"
     ARGUS_HTTP = "argus-http"
+    EXTERNAL = "external"  # a configured service outside the suite, read for up/down only
     PROCESS = "process"  # a GPU process no configured service claims
 
 
@@ -119,8 +150,10 @@ class Resident(BaseModel):
     idle_s: float | None = None
     busy: bool = False  # the service reports work in flight (ComfyUI queue, ...)
     host_ram_mb: int | None = None  # its container's anonymous memory (cgroup), when the agent reports it
+    peak_mb: int | None = None  # the most VRAM iris has seen it hold since the broker started (sampled each poll)
     expires_at: datetime | None = None  # Ollama keep_alive expiry
     detail: dict = Field(default_factory=dict)
+    tenant: str | None = None  # the tenant whose own process or service this is, when iris can link it (#36)
     policy: ResidentPolicy | None = None  # set when a policy rule matches
 
 
@@ -133,6 +166,11 @@ class ServiceState(BaseModel):
     error: str | None = None
     queue_running: int | None = None
     queue_pending: int | None = None
+    available: list[str] | None = None  # models it has pulled (Ollama); None when it cannot say
+    need_mb: int | None = None  # VRAM it takes warm: its configured warm_mb, else the most iris has seen it hold
+    room_mb: int | None = None  # the most it can get beside what the node can never free (NodeLedger.held_mb)
+    # need_mb > room_mb (#40): admission can never make room for it on this node, whatever it evicts.
+    crowded_out: bool = False
 
 
 class NodeLedger(BaseModel):
@@ -145,6 +183,11 @@ class NodeLedger(BaseModel):
     resident_mb: int  # sum of residents iris attributes
     unattributed_mb: int  # NVML used minus resident_mb: other users, CUDA contexts, the display
     admissible_mb: int  # what a new lease could get without evicting anything
+    pinned_mb: int = 0  # held by pinned residents, a dropped pin awaiting restore included
+    # What admission can never free (#40): pinned_mb, processes with no adapter (an NVR), externals iris may not stop,
+    # and the context an unloaded service keeps (only a restart returns it).
+    held_mb: int = 0
+    room_mb: int | None = None  # total - reserve - headroom - held_mb: the most any other service can get
 
 
 class NodeState(BaseModel):
@@ -158,3 +201,7 @@ class NodeState(BaseModel):
     ledger: NodeLedger | None = None
     residents: list[Resident] = Field(default_factory=list)
     services: list[ServiceState] = Field(default_factory=list)
+
+
+# The service directory's wire models (PeerLookup, DirectoryEntry, EntryHealth) are not here either: they are
+# argus-cortex's ``service`` module (#50), so the broker and cortex's ``peers`` client share one definition.

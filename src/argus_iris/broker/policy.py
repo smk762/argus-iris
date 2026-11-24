@@ -1,7 +1,7 @@
 """The operator's policy file (DESIGN.md, "Policy: schedules, keepalive, idle-kill").
 
 ```yaml
-timezone: America/Los_Angeles        # cron fields are read in this zone; everything else is UTC
+timezone: UTC                        # cron fields are read in this zone; everything else is UTC
 windows:                             # a tenant's leases run at `class` while its window is open
   - name: nightly-audit
     cron: "0 1 * * *"
@@ -10,18 +10,18 @@ windows:                             # a tenant's leases run at `class` while it
     target: "ollama:*"
     class: batch
 residents:                           # first matching rule wins; ids/models/services are fnmatch patterns
-  - match: { node: dragon, ollama: "hf.co/inclusionAI/SingGuard-4b-GGUF:*" }
+  - match: { node: rtx4060, ollama: "hf.co/inclusionAI/SingGuard-4b-GGUF:*" }
     keepalive: always                # pinned: never evicted, Ollama keep_alive held at -1
-  - match: { node: jarrah, ollama: "*" }
+  - match: { node: gtx1070, ollama: "*" }
     idle_kill: 5m
     enforce: true                    # act on it; without this iris only reports what it would do
-  - match: { resident: "dragon/modernbert" }
+  - match: { resident: "rtx4060/modernbert" }
     idle_kill: 15m
     restart_residual_mb: 64          # unloaded but holding a CUDA context this big: restart the container
-  - match: { resident: "dragon/xtts" }
+  - match: { resident: "rtx4060/xtts" }
     idle_kill: 120s                  # GPU -> CPU (evict_path), kept warm in host RAM ...
     unload_after: 600s               # ... then unloaded fully after 10 more minutes idle
-  - match: { resident: "morpheus/comfyui" }
+  - match: { resident: "rtx3090/comfyui" }
     idle_kill: 30m
     restart_host_ram_mb: 12288       # idle 2 min (restart_host_ram_idle) with > 12 GiB host RAM: restart it
 ```
@@ -40,7 +40,7 @@ import fnmatch
 import math
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -58,7 +58,10 @@ _UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400, None: 1}
 def parse_duration(value: object) -> float:
     """``90``, ``"90s"``, ``"15m"``, ``"5h"``, ``"1.5d"`` -> seconds."""
     if isinstance(value, int | float) and not isinstance(value, bool):
-        seconds = float(value)
+        try:
+            seconds = float(value)
+        except OverflowError:  # an int too big for a float: YAML loads a long unquoted digit string as one
+            raise ValueError(f"not a duration: {value!r} (must be finite and not negative)") from None
     else:
         m = _DURATION.match(str(value))
         if not m:
@@ -116,11 +119,16 @@ class Cron:
 
     def open_since(self, now: datetime, duration_s: float) -> datetime | None:
         """The start of a window of *duration_s* open at *now* (in *now*'s zone), or None."""
-        t = now.replace(second=0, microsecond=0)
-        earliest = now - timedelta(seconds=duration_s)
+        # Step back in UTC: aware datetimes in one zone subtract and compare by wall clock, which a DST change moves
+        # (a window an hour too long in the autumn, cut short in the spring). Each minute is matched in *now*'s zone.
+        zone = now.tzinfo
+        start = now.astimezone(UTC) if zone else now
+        t = start.replace(second=0, microsecond=0)
+        earliest = start - timedelta(seconds=duration_s)
         while t > earliest:
-            if self.matches(t):
-                return t
+            local = t.astimezone(zone) if zone else t
+            if self.matches(local):
+                return local
             t -= timedelta(minutes=1)
         return None
 
@@ -179,10 +187,13 @@ class ResidentRule(_Model):
     unload_after: Duration | None = None
     restart_residual_mb: int | None = Field(None, ge=0)
     # Restart the container once it has been idle `restart_host_ram_idle` and its anonymous memory (cgroup) is above
-    # this: ComfyUI's host RAM grows with use and only a restart returns it (voluptas#16). Unset, the tenant
+    # this: ComfyUI's host RAM grows with use and only a restart returns it. Unset, the tenant
     # manifest's `host_ram_restart_mb` hint for the resident's container applies.
     restart_host_ram_mb: int | None = Field(None, gt=0)
     restart_host_ram_idle: Duration = 120.0
+    # A pinned resident that drops out (an unload, a restart, an OOM, a model loaded over it) is warmed again once no
+    # lease is active or queued on its node and the node has room (#35). false: the pin only protects from eviction.
+    restore: bool = True
     enforce: bool = False
 
 

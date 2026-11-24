@@ -4,12 +4,14 @@ idle-kill (later rollout steps) call :func:`evict_resident` themselves.
 Warming a service means making it answer again: if its health check fails and it has a container, the node's agent
 starts that container (subject to the agent's own allowlist), then iris waits for the health check to pass. If it then
 has a ``warm_path`` (argus-http), iris calls that to load its model onto the GPU. This is what brings ComfyUI back
-after voluptas's old idle stop left it down.
+after an idle watcher left it down.
 
 Evicting a resident frees its VRAM through its adapter (DESIGN.md, "Adapters"): Ollama is sent ``keep_alive: 0`` for
 the model, ComfyUI ``POST /free`` (all its models: it is one resident), and an argus-http service its ``evict_path``
-(GPU to CPU, kept warm) or ``unload_path``. A busy resident is refused with 409, never interrupted. iris then re-polls
-the node until the memory is back by the agent's NVML view, and reports what the resident still holds: an unloaded
+(GPU to CPU, kept warm) or ``unload_path``. An external service has no such route: one configured with
+``evict_by: stop`` is freed by having its node's agent stop its container, and every other is refused. A busy
+resident is refused with 409, never interrupted. iris then re-polls the node until the memory is back by the agent's
+NVML view, and reports what the resident still holds: an unloaded
 service often keeps its CUDA context (modernbert, about 94 MB) or allocator cache (Miso, about 2 GB), which only a
 container restart returns.
 """
@@ -27,6 +29,7 @@ from argus_cortex.gpu_wire import ResidentActionReply, ResidentBusyReply
 from pydantic import BaseModel, ValidationError
 
 from argus_iris.broker.config import ServiceConfig
+from argus_iris.broker.residency import RESIDUAL_SLACK_MB, on_gpu
 from argus_iris.broker.state import Broker
 from argus_iris.models import NodeState, Resident, ResidentSource
 
@@ -60,8 +63,8 @@ async def _start_container(broker: Broker, svc: ServiceConfig) -> None:
     await container_action(broker, svc, "start")
 
 
-async def container_action(broker: Broker, svc: ServiceConfig, action: Literal["start", "restart"]) -> None:
-    """Ask the node's agent to start or restart *svc*'s container (the agent's own allowlist still applies)."""
+async def container_action(broker: Broker, svc: ServiceConfig, action: Literal["start", "stop", "restart"]) -> None:
+    """Ask the node's agent to start, stop or restart *svc*'s container (the agent's own allowlist still applies)."""
     node = broker.config.nodes[svc.node]
     token = os.environ.get(broker.config.agent_token_env, "")
     if not token:
@@ -78,9 +81,11 @@ async def container_action(broker: Broker, svc: ServiceConfig, action: Literal["
         raise ActionError(f"agent on {svc.node} unreachable: {exc}") from exc
     if resp.status_code != 200:
         try:
-            detail = resp.json().get("detail")
+            body = resp.json()
         except ValueError:
-            detail = resp.text[:200]
+            body = None
+        # Not every refusal is the agent's own JSON object: a proxy's list, string or null body is shown as text.
+        detail = body.get("detail") if isinstance(body, dict) else resp.text[:200]
         raise ActionError(f"agent on {svc.node} refused to {action} {svc.container}: HTTP {resp.status_code} {detail}")
 
 
@@ -165,6 +170,7 @@ async def warm_service(
             result.model_state = reply.model_state
         else:
             log.warning("resident_off_contract", service=svc.id, route=svc.warm_path, body=resp.text[:200])
+    broker.stopped.pop(svc.id, None)  # up again: nothing left for residency to bring back
     if not result.started_container and not result.warmed:
         result.detail = "already up"
     log.info("warm_done", **result.model_dump())
@@ -182,8 +188,9 @@ class EvictResult(BaseModel):
     node: str
     service: str
     model: str | None = None
-    action: Literal["unload", "evict"]  # evict: GPU to CPU, kept warm in host RAM; unload: gone from both
-    route: str  # what was called on the service
+    # evict: GPU to CPU, kept warm in host RAM; unload: gone from both; stop: the agent stopped the container
+    action: Literal["unload", "evict", "stop"]
+    route: str  # what was called on the service (for a stop, the agent's container route)
     before_mb: int
     after_mb: int = 0  # what the resident holds now; 0 when it is gone
     residual_mb: int = 0  # still held although the model left the GPU: a CUDA context or allocator cache
@@ -200,8 +207,14 @@ def find_resident(broker: Broker, resident_id: str) -> Resident | None:
 
 def _plan(
     svc: ServiceConfig, resident: Resident, mode: EvictMode
-) -> tuple[Literal["unload", "evict"], str, dict | None]:
+) -> tuple[Literal["unload", "evict", "stop"], str, dict | None]:
     """(action, route, JSON body) for evicting *resident* of *svc*."""
+    if resident.source == ResidentSource.EXTERNAL:
+        if svc.evict_by != "stop":
+            raise ActionError(f"{svc.id} is an external service: iris cannot free it through an adapter", 422)
+        if mode == "evict":
+            raise ActionError(f"{svc.id} has no CPU stage: evicting it stops its container", 422)
+        return "stop", f"/containers/{svc.container}/stop", None
     if resident.source == ResidentSource.OLLAMA:
         if mode == "evict":
             raise ActionError("Ollama has no CPU stage: use unload", 422)
@@ -256,18 +269,24 @@ async def evict_resident(
         raise ActionError(f"{resident_id} is busy: nothing was done; retry after the work finishes", 409)
     action, route, body = _plan(svc, resident, mode)
 
-    try:
-        resp = await broker.client.post(
-            f"{svc.base_url}{route}", json=body, headers=svc.headers(), timeout=httpx.Timeout(120.0)
-        )
-    except httpx.HTTPError as exc:
-        raise ActionError(f"{svc.id} {route} failed: {exc}") from exc
-    if resp.status_code == 409:
-        busy = _reply(resp, ResidentBusyReply)
-        running = f"{busy.active} running" if busy else resp.text[:200]
-        raise ActionError(f"{svc.id} is busy ({running}): nothing was done; retry after the work finishes", 409)
-    if resp.status_code >= 400:
-        raise ActionError(f"{svc.id} {route}: HTTP {resp.status_code} {resp.text[:200]}")
+    resp: httpx.Response | None = None
+    if action == "stop":
+        # Its clients fall back elsewhere (evict_by's premise); iris cannot see its work in flight, so a stop only
+        # follows the agent's idle reading: admission and idle-kill both wait for idle_s first.
+        await container_action(broker, svc, "stop")
+    else:
+        try:
+            resp = await broker.client.post(
+                f"{svc.base_url}{route}", json=body, headers=svc.headers(), timeout=httpx.Timeout(120.0)
+            )
+        except httpx.HTTPError as exc:
+            raise ActionError(f"{svc.id} {route} failed: {exc}") from exc
+        if resp.status_code == 409:
+            busy = _reply(resp, ResidentBusyReply)
+            running = f"{busy.active} running" if busy else resp.text[:200]
+            raise ActionError(f"{svc.id} is busy ({running}): nothing was done; retry after the work finishes", 409)
+        if resp.status_code >= 400:
+            raise ActionError(f"{svc.id} {route}: HTTP {resp.status_code} {resp.text[:200]}")
 
     result = EvictResult(
         resident=resident.id,
@@ -279,7 +298,7 @@ async def evict_resident(
         before_mb=resident.vram_mb,
         reason=reason,
     )
-    if svc.adapter == "argus-http":
+    if resp is not None and svc.adapter == "argus-http":
         reply = _reply(resp, ResidentActionReply)
         if reply is not None:
             result.model_state = reply.model_state
@@ -304,7 +323,10 @@ async def evict_resident(
     # Without this, ComfyUI at a few hundred MB after /free (which frees nothing more) would be evicted every minute.
     # Not for an Ollama model still listed unconfirmed, though: it is still loaded (a slow or refused unload), and
     # recording its full size would make it count as evicted, so idle-kill would never try it again.
-    if result.confirmed or now is None or resident.source != ResidentSource.OLLAMA:
+    # Nor for anything that grew during the wait or says it is on the GPU: a request loaded the model meanwhile
+    # (rtx4060/xtts, 2026-11-21: 146 MB on the CPU, unload sent, 1970 MB back on the GPU, written off as its floor).
+    loaded = now is not None and (now.vram_mb > result.before_mb + RESIDUAL_SLACK_MB or on_gpu(now))
+    if not loaded and (result.confirmed or now is None or resident.source != ResidentSource.OLLAMA):
         broker.residuals[resident.id] = result.after_mb
     broker.residency.annotate(broker.nodes[resident.node])  # the policy view now knows it is evicted
     if result.confirmed:
@@ -317,15 +339,26 @@ async def evict_resident(
     return result
 
 
-async def set_keep_alive(broker: Broker, resident: Resident, keep_alive: str | int) -> None:
-    """Set a loaded Ollama model's keep_alive (``-1`` pins it). Ollama resets the model's timer to this."""
-    svc = next(s for s in broker.config.services if s.id == resident.service)
+async def set_keep_alive(broker: Broker, resident: Resident, keep_alive: str | int, *, timeout_s: float = 60.0) -> None:
+    """Set a loaded Ollama model's keep_alive (``-1`` pins it). Ollama resets the model's timer to this.
+
+    The request carries the context the model is loaded with: Ollama reloads a model for a request whose ``num_ctx``
+    differs, so a bare call reloaded a model its caller had loaded with a larger context (SingGuard at 16384 on
+    rtx4060), and the caller's next request reloaded it back, about once a minute while it was pinned. For a model that
+    is not loaded (residency restoring a pin, #35) the same call loads it, at the context it had.
+    """
+    svc = next((s for s in broker.config.services if s.id == resident.service), None)
+    if svc is None:  # a pin restored for a service the config no longer has
+        raise ActionError(f"unknown service {resident.service!r} for {resident.model}", 404)
+    body: dict = {"model": resident.model, "keep_alive": keep_alive}
+    if ctx := resident.detail.get("context_length"):
+        body["options"] = {"num_ctx": ctx}
     try:
         resp = await broker.client.post(
             f"{svc.base_url}/api/generate",
-            json={"model": resident.model, "keep_alive": keep_alive},
+            json=body,
             headers=svc.headers(),
-            timeout=httpx.Timeout(60.0),
+            timeout=httpx.Timeout(timeout_s),
         )
     except httpx.HTTPError as exc:
         raise ActionError(f"{svc.id} keep_alive for {resident.model} failed: {exc}") from exc

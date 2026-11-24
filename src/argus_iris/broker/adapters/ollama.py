@@ -1,4 +1,5 @@
-"""Ollama: the loaded models from ``/api/ps``, with their VRAM share and keep-alive expiry."""
+"""Ollama: the loaded models from ``/api/ps``, with their VRAM share and keep-alive expiry, and the pulled ones
+from ``/api/tags`` (placement skips a service that would have to pull the model)."""
 
 from __future__ import annotations
 
@@ -18,13 +19,35 @@ def _parse_time(raw: str | None) -> datetime | None:
         # Ollama sends RFC 3339 with nanoseconds; Python takes microseconds at most.
         head, dot, tail = raw.partition(".")
         if dot:
-            digits = "".join(c for c in tail if c.isdigit())
+            # Only the leading run: the digits of a "-07:00" offset are not part of the fraction.
+            digits = tail[: len(tail) - len(tail.lstrip("0123456789"))]
             zone = tail[len(digits) :]
             raw = f"{head}.{digits[:6]}{zone}"
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
     return parsed if parsed.tzinfo else None
+
+
+def _models(data: dict) -> list[ModelReading]:
+    models = []
+    for m in data.get("models") or []:
+        size, size_vram = int(m.get("size") or 0), int(m.get("size_vram") or 0)
+        models.append(
+            ModelReading(
+                name=m.get("name") or m.get("model") or "?",
+                vram_mb=size_vram // MIB,
+                expires_at=_parse_time(m.get("expires_at")),
+                # size_vram < size: Ollama split the model across GPU and CPU because it did not fit.
+                detail={
+                    "size_mb": size // MIB,
+                    "partial_offload": 0 < size_vram < size,
+                    # The context it was loaded with: a keep_alive call must send it back (actions.set_keep_alive).
+                    **({"context_length": int(m["context_length"])} if m.get("context_length") else {}),
+                },
+            )
+        )
+    return models
 
 
 class OllamaAdapter:
@@ -35,19 +58,17 @@ class OllamaAdapter:
         try:
             resp = await client.get(f"{self.service.base_url}/api/ps", headers=self.service.headers())
             resp.raise_for_status()
-            data = resp.json()
-        except (httpx.HTTPError, ValueError) as exc:
+            models = _models(resp.json())
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
+            # A body not shaped like /api/ps (the wrong service, a proxy's error page) is no reading either.
             return unreachable(exc)
-        models = []
-        for m in data.get("models") or []:
-            size, size_vram = int(m.get("size") or 0), int(m.get("size_vram") or 0)
-            models.append(
-                ModelReading(
-                    name=m.get("name") or m.get("model") or "?",
-                    vram_mb=size_vram // MIB,
-                    expires_at=_parse_time(m.get("expires_at")),
-                    # size_vram < size: Ollama split the model across GPU and CPU because it did not fit.
-                    detail={"size_mb": size // MIB, "partial_offload": 0 < size_vram < size},
-                )
-            )
-        return ServiceReading(up=True, models=models)
+        return ServiceReading(up=True, models=models, available=await self._tags(client))
+
+    async def _tags(self, client: httpx.AsyncClient) -> list[str] | None:
+        try:
+            resp = await client.get(f"{self.service.base_url}/api/tags", headers=self.service.headers())
+            resp.raise_for_status()
+            names = [m.get("name") or m.get("model") for m in resp.json().get("models") or []]
+        except (httpx.HTTPError, ValueError, AttributeError):
+            return None  # unknown: placement does not filter on it
+        return sorted(n for n in names if n)

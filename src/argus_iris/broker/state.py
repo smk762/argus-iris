@@ -9,15 +9,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
+import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
 import structlog
 
 from argus_iris.broker.adapters import ServiceReading, build_adapter
 from argus_iris.broker.config import BrokerConfig, NodeConfig, ServiceConfig
+from argus_iris.broker.directory import Directory, own_container_id
 from argus_iris.broker.leases import LeaseBook, LeaseRecord
 from argus_iris.broker.policy import Policy
+from argus_iris.broker.registry import Registry
 from argus_iris.broker.residency import Residency
 from argus_iris.models import (
     GpuProcess,
@@ -61,6 +66,7 @@ def _service_residents(
                 model=m.name,
                 vram_mb=m.vram_mb,
                 idle_s=idle,  # per process: Ollama does not say which model ran last
+                busy=reading.busy,
                 expires_at=m.expires_at,
                 detail=m.detail,
             )
@@ -108,6 +114,7 @@ def compose_node(
             error=r.error,
             queue_running=r.queue_running,
             queue_pending=r.queue_pending,
+            available=r.available,
         )
         for svc, r in services
     ]
@@ -176,6 +183,47 @@ def compose_node(
     return state
 
 
+def room_for_services(
+    state: NodeState,
+    cfg: NodeConfig,
+    services: list[ServiceConfig],
+    held: dict[str, Resident],
+    peaks: dict[str, int],
+    pinned: set[str],
+) -> list[ServiceState]:
+    """Mark each service on *state* that cannot fit beside what admission can never free (#40); return those.
+
+    *held* maps each such resident (pinned, a dropped pin awaiting restore included; a process iris has no adapter
+    for; what an unloaded service keeps) to it as it holds the most, and *pinned* names the pinned ones. A service's
+    need is the larger of its ``warm_mb`` and the most iris has seen it hold; an Ollama service's is its ``warm_mb``
+    only (unset: none), since what it takes depends on the model. What the service holds itself counts toward its need, not against its room. Pure.
+    """
+    if state.ledger is None:
+        return []
+    led = state.ledger
+    base = led.total_mb - cfg.reserve_mb - cfg.headroom_mb
+    led.pinned_mb = sum(r.vram_mb for rid, r in held.items() if rid in pinned)
+    led.held_mb = sum(r.vram_mb for r in held.values())
+    led.room_mb = max(0, base - led.held_mb)
+    by_id = {s.id: s for s in services}
+    crowded: list[ServiceState] = []
+    for st in state.services:
+        svc = by_id.get(st.id)
+        if svc is None:
+            continue
+        seen = None if svc.adapter == "ollama" else peaks.get(f"{state.name}/{svc.id}")
+        # The larger of the two: a warm_mb that understates what the service really takes (a second model loaded,
+        # say) must not hide that it no longer fits.
+        st.need_mb = max(svc.warm_mb or 0, seen or 0) or None
+        if not st.need_mb:
+            continue
+        st.room_mb = max(0, base - sum(r.vram_mb for r in held.values() if r.service != svc.id))
+        st.crowded_out = st.need_mb > st.room_mb
+        if st.crowded_out:
+            crowded.append(st)
+    return crowded
+
+
 def _volatile_free(state: NodeState) -> dict:
     """A node's state without the fields that change every poll, to tell real changes from ticks."""
     data = state.model_dump(mode="json", exclude={"last_seen"})
@@ -201,13 +249,26 @@ class Broker:
         self.residuals: dict[str, int] = {}
         # The most VRAM each resident has been seen holding, so a manual warm can tell whether it would fit.
         self.peaks: dict[str, int] = {}
+        # External services admission stopped for room (evict_by: stop) -> the lease it was for. Residency warms each
+        # again once no lease is active on its node and the node can admit it; a manual or idle-kill stop is not here.
+        self.stopped: dict[str, str] = {}
         self.residency = Residency(self, self.policy)
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(config.agent_timeout_s))
+        # Tenants' manifests and announced agents (registry.py): loaded before anything reads config.nodes/services,
+        # since registered nodes and services join those same collections.
+        state_dir = os.environ.get("IRIS_STATE_DIR") or config.state_dir
+        self.registry = Registry(config, state_dir=Path(state_dir) if state_dir else None)
+        self.registry.load()
+        self.registry.reconcile()
         self._adapters = {s.id: build_adapter(s) for s in config.services}
+        self.directory = Directory(config, self._client, self_id=own_container_id())
+        self.directory.rebuild(self.registry.inventory)
         self.nodes: dict[str, NodeState] = {
             name: NodeState(name=name, agent_url=cfg.agent_url, reachable=False) for name, cfg in config.nodes.items()
         }
         self._last_seen: dict[str, object] = {}
+        self._over_warm: set[str] = set()  # residents warned for holding more than their service's warm_mb
+        self._crowded: dict[str, set[str]] = {}  # node -> services flagged crowded out
         self._fingerprints: dict[str, dict] = {}
         self._subscribers: set[asyncio.Queue[Event]] = set()
         self.polls = 0
@@ -219,6 +280,8 @@ class Broker:
             pinned=self.residency.protected,
             policy=self.policy,
         )
+        for reg in self.registry.tenants.values():
+            self.leases.register(reg.manifest)
         self._tasks: set[asyncio.Task] = set()
 
     async def aclose(self) -> None:
@@ -238,8 +301,9 @@ class Broker:
             self._fetch_snapshot(cfg), *(self._adapters[s.id].read(self._client) for s in services)
         )
         snapshot, error = snap_result
-        if snapshot is not None:
+        if snapshot is not None and name in self.config.nodes:  # it may have been forgotten during the await
             self._last_seen[name] = utcnow()
+            self.registry.observe(name, snapshot.inventory)
         return compose_node(
             name,
             cfg,
@@ -250,10 +314,17 @@ class Broker:
         )
 
     def _apply(self, name: str, state: NodeState) -> None:
+        if name not in self.config.nodes:
+            return  # forgotten while this poll was in flight: do not bring it back
+        for r in state.residents:
+            r.tenant = self.leases.tenant_of(r)
         self.residency.annotate(state)
         for r in state.residents:
             if r.vram_mb > self.peaks.get(r.id, 0):
                 self.peaks[r.id] = r.vram_mb
+                self._check_warm_mb(r)
+            r.peak_mb = self.peaks.get(r.id)
+        self._check_room(name, state)
         was = self.nodes.get(name)
         if was and was.reachable != state.reachable:
             log.info("agent_reachability", node=name, reachable=state.reachable, error=state.error)
@@ -263,12 +334,120 @@ class Broker:
             self._fingerprints[name] = fingerprint
             self._publish(("node", state))
 
+    def _check_warm_mb(self, r: Resident) -> None:
+        """Warn, once per resident, when it holds more than its service's configured ``warm_mb``: the figure is out of
+        date (a second model loaded, a bigger context), and the tenant manifest it came from likely is too."""
+        if r.id in self._over_warm or r.id != f"{r.node}/{r.service}":
+            return  # warned already, or an Ollama model: warm_mb is not one model's size
+        svc = next((s for s in self.config.services_on(r.node) if s.id == r.service), None)
+        if svc is None or svc.warm_mb is None or r.vram_mb <= svc.warm_mb:
+            return
+        self._over_warm.add(r.id)
+        log.warning(
+            "resident_over_warm_mb",
+            resident=r.id,
+            vram_mb=r.vram_mb,
+            warm_mb=svc.warm_mb,
+            model_state=r.detail.get("model_state"),
+            container=svc.container,
+        )
+
+    def _held_on(self, state: NodeState) -> tuple[dict[str, Resident], set[str]]:
+        """What admission can never free on *state*'s node, each resident as it holds the most, and which are pins.
+
+        Pinned residents, and a pin that dropped out and residency will load again; a process with no adapter and no
+        tenant (an NVR: a tenant's own process comes and goes with its work); an external service iris may not stop;
+        and the context an unloaded, CPU-parked or failed service keeps, which only a restart returns.
+        """
+        held: dict[str, Resident] = {}
+        pinned: set[str] = set()
+        stoppable = {s.id for s in self.config.services_on(state.name) if s.evict_by}
+        for r in state.residents:
+            if self.residency.pinned(r) or any(fnmatch.fnmatchcase(r.id, pat) for pat in self.config.pinned):
+                pinned.add(r.id)
+            elif not (
+                (r.source == ResidentSource.PROCESS and r.tenant is None)
+                or (r.source == ResidentSource.EXTERNAL and r.service not in stoppable)
+                or r.detail.get("model_state") in ("unloaded", "cpu", "error")
+                or self.residency.evicted(r)
+            ):
+                continue
+            held[r.id] = r
+        for rid, memo in self.residency.pins.items():
+            if memo.resident.node != state.name or not self.residency.pinned(memo.resident):
+                continue
+            pinned.add(rid)
+            if rid not in held or memo.resident.vram_mb > held[rid].vram_mb:
+                held[rid] = memo.resident
+        return held, pinned
+
+    def _check_room(self, name: str, state: NodeState) -> None:
+        """Flag services that cannot fit beside what the node can never free (#40), logging when that changes."""
+        if not state.reachable:
+            return  # no ledger this poll: keep the last verdict rather than flap
+        held, pinned = self._held_on(state)
+        crowded = room_for_services(
+            state, self.config.nodes[name], self.config.services_on(name), held, self.peaks, pinned
+        )
+        now = {st.id: st for st in crowded}
+        was = self._crowded.get(name, set())
+        for sid in now.keys() - was:
+            st = now[sid]
+            biggest = sorted(held.values(), key=lambda r: -r.vram_mb)[:4]
+            log.warning(
+                "service_crowded_out",
+                node=name,
+                service=sid,
+                need_mb=st.need_mb,
+                room_mb=st.room_mb,
+                held_by={r.id: r.vram_mb for r in biggest if r.service != sid},
+            )
+        for sid in was - now.keys():
+            log.info("service_crowded_out_cleared", node=name, service=sid)
+        self._crowded[name] = set(now)
+
+    def crowded(self) -> list[dict]:
+        """Services that cannot fit beside what their node can never free (#40), for /health."""
+        return [
+            {"node": name, "service": st.id, "need_mb": st.need_mb, "room_mb": st.room_mb}
+            for name, state in self.nodes.items()
+            for st in state.services
+            if st.crowded_out
+        ]
+
     async def poll_once(self) -> None:
         names = list(self.config.nodes)
         states = await asyncio.gather(*(self._poll_node(n, self.config.nodes[n]) for n in names))
         for name, state in zip(names, states, strict=True):
             self._apply(name, state)
         self.polls += 1
+        if self.reconcile():
+            # A registered service appeared or went with this poll's inventories: show it now, not a poll later.
+            names = list(self.config.nodes)
+            states = await asyncio.gather(*(self._poll_node(n, self.config.nodes[n]) for n in names))
+            for name, state in zip(names, states, strict=True):
+                self._apply(name, state)
+
+    def reconcile(self) -> bool:
+        """Bring nodes, services and adapters in line with the registry (a registration, a lapse, an announced
+        node, or a container that came or went). True when the services changed."""
+        changed = self.registry.reconcile()
+        self.directory.rebuild(self.registry.inventory)
+        if changed:
+            adapters = {}
+            for s in self.config.services:
+                old = self._adapters.get(s.id)
+                adapters[s.id] = old if old is not None and old.service is s else build_adapter(s)
+            self._adapters = adapters
+        for name, cfg in self.config.nodes.items():
+            if name not in self.nodes:
+                self.nodes[name] = NodeState(name=name, agent_url=cfg.agent_url, reachable=False)
+        for name in set(self.nodes) - set(self.config.nodes):
+            del self.nodes[name]
+            self._fingerprints.pop(name, None)
+            self._crowded.pop(name, None)
+            self._last_seen.pop(name, None)
+        return changed
 
     async def refresh(self, name: str) -> NodeState:
         """Poll one node now (after an action, to see its effect) and publish the change."""
@@ -277,7 +456,15 @@ class Broker:
         return state
 
     async def run(self) -> None:
-        await asyncio.gather(self._poll_loop(), self._tick_loop(), self._residency_loop())
+        await asyncio.gather(self._poll_loop(), self._tick_loop(), self._residency_loop(), self._directory_loop())
+
+    async def _directory_loop(self) -> None:
+        while True:
+            try:
+                await self.directory.probe()
+            except Exception:  # noqa: BLE001 - a failed round must not stop the directory for good
+                log.exception("directory_probe_failed")
+            await asyncio.sleep(min(5.0, self.config.directory_health_s))
 
     async def _poll_loop(self) -> None:
         while True:
@@ -326,6 +513,8 @@ class Broker:
                 else:
                     if not result.confirmed:
                         failed.append(rid)
+                    elif result.action == "stop":
+                        self.stopped[result.service] = lease_id  # residency starts it again once the room is free
         finally:
             self.leases.evictions_done(lease_id, failed)
 

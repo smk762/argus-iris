@@ -1,6 +1,5 @@
-# NOTE: .git is deliberately *not* ignored -- hatch-vcs reads the version from
-# git history at build time. Set `version_build_arg` if you want it excluded.
-.github
+# .git is *not* ignored: the builder stage reads the version from it (hatch-vcs) and it never reaches the final image.
+# Don't ignore tracked files either: git would call the tree dirty, and the version would say so.
 .venv
 venv
 dist
@@ -13,4 +12,11 @@ build
 .mypy_cache
 .coverage
 htmlcov
-.env
+
+# Local secrets and live configuration. Patterns match from the context root, so subdirectories need the **/.
+**/.env
+**/.env.*
+!**/.env.example
+deploy/iris.yaml
+deploy/policy.yaml
+**/*.bak*

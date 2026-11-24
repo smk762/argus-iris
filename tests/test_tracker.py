@@ -25,7 +25,7 @@ def test_steady_vram_and_no_util_accumulates_idle() -> None:
 
 
 def test_util_resets_idle_even_with_steady_vram() -> None:
-    # gothmog's VRAM-only rule would call this idle: an Ollama model generating at a fixed footprint.
+    # A VRAM-only rule would call this idle: an Ollama model generating at a fixed footprint.
     t = ProcessTracker()
     t.update(sample(1000, proc_util={}), now=0, wall=WALL)
     (rec,) = t.update(sample(1000, proc_util={42: 80}), now=30, wall=WALL)

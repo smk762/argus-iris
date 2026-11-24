@@ -28,6 +28,7 @@ class ServiceReading:
     queue_running: int | None = None
     queue_pending: int | None = None
     models: list[ModelReading] = field(default_factory=list)
+    available: list[str] | None = None  # models the service can load without a pull (Ollama /api/tags); None: unknown
     detail: dict = field(default_factory=dict)
 
 
