@@ -19,7 +19,7 @@ import structlog
 
 from argus_iris.broker.adapters import ServiceReading, build_adapter
 from argus_iris.broker.config import BrokerConfig, NodeConfig, ServiceConfig
-from argus_iris.broker.directory import Directory
+from argus_iris.broker.directory import Directory, own_container_id
 from argus_iris.broker.leases import LeaseBook, LeaseRecord
 from argus_iris.broker.policy import Policy
 from argus_iris.broker.registry import Registry
@@ -261,7 +261,7 @@ class Broker:
         self.registry.load()
         self.registry.reconcile()
         self._adapters = {s.id: build_adapter(s) for s in config.services}
-        self.directory = Directory(config, self._client)
+        self.directory = Directory(config, self._client, self_id=own_container_id())
         self.directory.rebuild(self.registry.inventory)
         self.nodes: dict[str, NodeState] = {
             name: NodeState(name=name, agent_url=cfg.agent_url, reachable=False) for name, cfg in config.nodes.items()

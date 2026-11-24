@@ -12,6 +12,9 @@ whose compose file labels it ``argus.peer: <name>`` (argus-cortex#210, #212) is 
   down by its HTTP status. Only those fields are kept, never the body.
 - **Config wins:** ``peers:`` in the broker config names URLs (a host with no agent, a service outside Docker) that
   come first for that peer.
+- **Itself:** the broker's own container (found from ``/proc/self/mountinfo``) is probed on loopback at its container
+  port: a container cannot reach itself through its host's published port (Docker hairpin), so the LAN URL would
+  read as down. The entry still lists the LAN URL callers use.
 - **Wire:** the entries and the lookup reply are argus-cortex's ``service.DirectoryEntry``, ``EntryHealth`` and
   ``PeerLookup`` (#50), the models cortex's ``peers`` client reads. They are frozen, so an entry is replaced, never
   changed in place. A container whose labels cortex's model refuses (a peer name outside ``PEER_NAME_PATTERN``, a
@@ -24,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
+import socket
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -44,6 +49,20 @@ PEER, SERVICE, HEALTH, PORT = "argus.peer", "argus.service", "argus.health", "ar
 STATUSES = ("ok", "degraded", "starting")
 _MAX_ITEMS = 32  # of wire versions, capabilities and checks kept from one health body
 _RANK = {"ok": 0, "degraded": 1, "starting": 2, None: 3, "down": 4}
+
+
+_CONTAINER_ID = re.compile(r"/containers/([0-9a-f]{64})/")
+
+
+def own_container_id(mountinfo: str = "/proc/self/mountinfo") -> str | None:
+    """This process's Docker container id, or None outside a container. Docker mounts the container's own
+    ``hostname``/``hosts`` files from ``.../containers/<id>/``; the hostname (the short id unless compose sets one)
+    is the fallback, matched as a prefix."""
+    with contextlib.suppress(OSError), open(mountinfo, encoding="utf-8") as f:
+        if m := _CONTAINER_ID.search(f.read()):
+            return m.group(1)
+    host = socket.gethostname()
+    return host if re.fullmatch(r"[0-9a-f]{12,64}", host) else None
 
 
 def _text(v: Any, limit: int = 200) -> str | None:
@@ -130,8 +149,16 @@ def read_health(
 
 
 class Directory:
-    def __init__(self, config: BrokerConfig, client: httpx.AsyncClient, clock: Callable[[], datetime] = utcnow) -> None:
+    def __init__(
+        self,
+        config: BrokerConfig,
+        client: httpx.AsyncClient,
+        clock: Callable[[], datetime] = utcnow,
+        self_id: str | None = None,
+    ) -> None:
         self.config = config
+        self._self_id = self_id  # the broker's own container id: probed on loopback, not through the LAN
+        self._probe_base: dict[tuple[str, str | None, str | None], str] = {}  # key -> loopback base URL
         self._client = client
         self._clock = clock
         self.entries: list[DirectoryEntry] = []
@@ -155,6 +182,7 @@ class Directory:
             for url in urls
         ]
         refused: set[tuple[str, str]] = set()
+        probe_base: dict[tuple[str, str | None, str | None], str] = {}
         for node in self.config.nodes:
             for c in inventories.get(node, []):
                 peer = (c.labels.get(PEER) or "").strip()
@@ -193,11 +221,19 @@ class Directory:
                         )
                     continue
                 entries.append(entry)
+                if port and self._is_self(c):
+                    private = next((p.private for p in c.ports if p.public == port and p.proto == "tcp"), port)
+                    probe_base[self._key(entry)] = f"http://127.0.0.1:{private}"
         self._refused = refused
+        self._probe_base = probe_base
         entries = [self._with_health(e) for e in entries]
         keys = {self._key(e) for e in entries}
         self._health = {k: h for k, h in self._health.items() if k in keys}
         self.entries = entries
+
+    def _is_self(self, c: ContainerEntry) -> bool:
+        sid = self._self_id
+        return bool(sid) and (c.id == sid or (len(sid) < 64 and c.id.startswith(sid)))
 
     def _due(self, e: DirectoryEntry) -> bool:
         if not (e.url and e.running):
@@ -222,7 +258,8 @@ class Directory:
 
     async def _probe_one(self, e: DirectoryEntry) -> EntryHealth:
         try:
-            resp = await self._client.get(f"{e.url}{e.health_path}", timeout=self.config.directory_probe_timeout_s)
+            base = self._probe_base.get(self._key(e), e.url)
+            resp = await self._client.get(f"{base}{e.health_path}", timeout=self.config.directory_probe_timeout_s)
         except httpx.HTTPError as exc:
             return read_health(None, None, error=f"{type(exc).__name__}: {exc}"[:200])
         try:

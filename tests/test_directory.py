@@ -9,7 +9,7 @@ from argus_cortex.service import DirectoryEntry, PeerLookup
 from fastapi.testclient import TestClient
 
 from argus_iris.broker.config import BrokerConfig
-from argus_iris.broker.directory import Directory, read_health
+from argus_iris.broker.directory import Directory, own_container_id, read_health
 from argus_iris.broker.state import Broker
 from argus_iris.models import ContainerEntry, PortMap
 from argus_iris.server.app import create_app
@@ -348,3 +348,29 @@ def test_the_brokers_own_health_reads_as_the_contract() -> None:
     own = read_health(r.status_code, r.json())
     assert own.contract and own.service == "argus-iris" and own.wire["directory_version"] == "1.0"
     assert own.status == "degraded" and not own.checks["agents"].ok  # no agent has been polled yet
+
+
+async def test_the_broker_probes_itself_on_loopback(tmp_path) -> None:
+    # A container can't reach itself through its host's published port (Docker hairpin): the broker's own entry is
+    # read at 127.0.0.1 and its container port, while the directory still lists the LAN URL for callers.
+    me = c("iris-broker", (8120, 8121), labels={"argus.peer": "iris"})
+    seen: list[str] = []
+
+    def svc(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.url.host}:{request.url.port}")
+        return httpx.Response(200, json={"status": "ok"})
+
+    d = Directory(
+        BrokerConfig.model_validate(CONFIG),
+        httpx.AsyncClient(transport=httpx.MockTransport(svc)),
+        self_id=me.id[:12],  # the hostname fallback: a short id
+    )
+    d.rebuild({"morpheus": [me, INVENTORIES["morpheus"][0]]})
+    await d.probe()
+    assert sorted(seen) == ["127.0.0.1:8120", "192.168.1.39:8130"]
+    iris = next(e for e in d.entries if e.peer == "iris")
+    assert iris.url == "http://192.168.1.39:8121" and iris.health.status == "ok"
+
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(f"1 2 0:1 /var/lib/docker/containers/{me.id}/hostname /etc/hostname rw - ext4 x rw\n")
+    assert own_container_id(str(mountinfo)) == me.id
