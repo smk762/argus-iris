@@ -2,11 +2,16 @@
 
 [![CI](https://github.com/smk762/argus-iris/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/smk762/argus-iris/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/argus-iris)](https://pypi.org/project/argus-iris/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/smk762/argus-iris/blob/main/LICENSE)
 
 **A GPU lease broker for a small fleet of mixed cards.** Image generation, LLMs, speech and training jobs share a few
 GPUs, each assuming it owns the card, until one of them runs out of memory. iris decides whether a job may start now,
 on which node, and which idle model must be unloaded first. It never runs the work.
+
+**[Try the guided demo](https://iris.dragonhound.dev)**: the published broker and its real dashboard, replayed on simulated
+cards ([how it was recorded](https://github.com/smk762/argus-iris-demo#how-it-was-recorded)).
+
+[![The demo: a guided tour beside the dashboard, with a batch job running, a training job queued and an interactive job granted ahead of it](https://raw.githubusercontent.com/smk762/argus-iris/main/docs/demo.png)](https://iris.dragonhound.dev)
 
 ```
  callers (argus-cortex client)          dashboard          Prometheus
@@ -45,16 +50,16 @@ cp deploy/iris.example.yaml deploy/iris.yaml     # set your nodes and services
 docker compose build && docker compose up -d     # broker and agent on this host
 ```
 
-Open `http://<HOST_IP>:8120/ui/`. Ports bind to localhost unless `HOST_IP` is set. Read [SECURITY.md](SECURITY.md) before exposing either port: the agent holds the
+Open `http://<HOST_IP>:8120/ui/`. Ports bind to localhost unless `HOST_IP` is set. Read [SECURITY.md](https://github.com/smk762/argus-iris/blob/main/SECURITY.md) before exposing either port: the agent holds the
 Docker socket.
 
 Or from PyPI: `pip install 'argus-iris[server,cli]'` for the broker, `pip install 'argus-iris[agent,cli]'` for a node.
 
 ## Read more
 
-- [DESIGN.md](DESIGN.md): the problem, admission, scheduling and eviction, and what is built or still planned.
-- [docs/operating.md](docs/operating.md): deployment, adding services and GPU hosts, leases, the service directory.
-- [SECURITY.md](SECURITY.md): what each port can do, and how it is guarded.
+- [DESIGN.md](https://github.com/smk762/argus-iris/blob/main/DESIGN.md): the problem, admission, scheduling and eviction, and what is built or still planned.
+- [docs/operating.md](https://github.com/smk762/argus-iris/blob/main/docs/operating.md): deployment, adding services and GPU hosts, leases, the service directory.
+- [SECURITY.md](https://github.com/smk762/argus-iris/blob/main/SECURITY.md): what each port can do, and how it is guarded.
 
 ## Develop
 

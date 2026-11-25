@@ -4,6 +4,14 @@ Notable changes to `argus-iris`. Versions come from git tags via `hatch-vcs`.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-25
+
+Documentation only: the code is the same as 0.2.1.
+
+### Changed
+
+- README links the [guided demo](https://iris.dragonhound.dev), and its links work on PyPI.
+
 ## [0.2.1] - 2026-11-25
 
 ### Added
