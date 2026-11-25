@@ -4,6 +4,10 @@ Notable changes to `argus-iris`. Versions come from git tags via `hatch-vcs`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Without the `cli` extra, the `argus-iris` command says what to install instead of failing with a `typer` import traceback.
+
 ## [0.2.2] - 2026-11-25
 
 Documentation only: the code is the same as 0.2.1.

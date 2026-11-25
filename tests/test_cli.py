@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 
 import pytest
 from typer.testing import CliRunner
@@ -75,3 +77,11 @@ def test_binds_to_localhost_unless_overridden(tmp_path, monkeypatch, command, ov
     result = CliRunner().invoke(app, [command])
     assert result.exit_code == 0, result.output
     assert bound["host"] == (override or "127.0.0.1")
+
+
+def test_without_the_cli_extra_the_command_says_what_to_install() -> None:
+    # A None entry in sys.modules makes the import fail as if typer were not installed.
+    code = "import sys; sys.modules['typer'] = None; import argus_iris.cli"
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert done.returncode == 1
+    assert "argus-iris[server,cli]" in done.stderr and "Traceback" not in done.stderr
