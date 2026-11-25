@@ -61,6 +61,7 @@ dev = [
 argus-iris = "argus_iris.cli:app"
 
 [project.urls]
+Homepage = "https://iris.dragonhound.dev"
 Repository = "https://github.com/smk762/argus-iris"
 Changelog = "https://github.com/smk762/argus-iris/blob/dev/CHANGELOG.md"
 
