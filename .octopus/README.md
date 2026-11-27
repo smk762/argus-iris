@@ -36,40 +36,33 @@ script exports the variables and calls one of them (see [Steps](#steps)).
    | dragon | Production | `iris-agent` |
    | jarrah | Production | `iris-agent` |
 
-4. **Variables** (project → Variables). Sensitive ones are kept in Octopus, never in git.
+4. **Variables.** With Config as Code, every non-sensitive variable is committed to this public repo
+   ([project/variables.ocl](project/variables.ocl): `IRIS_ENV`, `IRIS_TAG`, `IRIS_PORT`, `IRIS_AGENT_NODE`). Anything
+   private goes in as **sensitive** (project → Variables), which Octopus keeps in its database:
 
    | Name | Value | Scope |
    |---|---|---|
-   | `IRIS_ENV` | `#{Octopus.Environment.Name \| ToLower}` | |
-   | `IRIS_TAG` | `#{Octopus.Action[Render broker config].Package[argus-iris].PackageVersion}` (check the exact form) | |
-   | `IRIS_PORT` | `8121` / `8120` | Staging / Production |
-   | `IRIS_AGENT_NODE` | `#{Octopus.Machine.Name}` | |
+   | `IRIS_CONFIG_B64` | `base64 -w0 deploy/iris.yaml` (it lists LAN hosts; a sensitive value is one line) | |
+   | `IRIS_POLICY_B64` | `base64 -w0 deploy/policy.yaml` | |
    | `HOST_IP` | the LAN address services bind to | per target |
    | `IRIS_BROKER_URL` | the production broker's URL | Production |
    | `IRIS_AGENT_CONTAINERS` | e.g. `voluptas_comfyui` | per target |
-   | `IRIS_CONFIG_BODY` | the whole `iris.yaml` (multi-line). It lists LAN hosts, so it stays out of this public repo | |
-   | `IRIS_POLICY_BODY` | the whole `policy.yaml` (multi-line) | |
-   | `IRIS_AGENT_TOKEN`, `ARGUS_GPU_BROKER_TOKEN`, `ARGUS_ADMIN_TOKEN`, `RAG_CHAT_API_KEY`, `LENS_ADMIN_TOKEN`, `ECHO_ADMIN_TOKEN` | sensitive | Production only |
+   | `IRIS_AGENT_TOKEN`, `ARGUS_GPU_BROKER_TOKEN`, `ARGUS_ADMIN_TOKEN`, `RAG_CHAT_API_KEY`, `LENS_ADMIN_TOKEN`, `ECHO_ADMIN_TOKEN` | | Production only |
 
    Staging gets no secrets on purpose: the staging broker runs with `IRIS_REPORT_ONLY=1` and no tokens, so it can
    read everything and change nothing.
 
-5. **Process** (see [Steps](#steps)), then set `TF_VAR_release_trigger=true` in `.env` and apply again.
+   Edit the process and the non-sensitive variables as OCL in this repo, not in the Octopus UI: a UI save commits
+   with the signed-in user's name and email (the login), and pushes at once.
+
+5. **Process.** It is [project/deployment_process.ocl](project/deployment_process.ocl) (see [Steps](#steps)). Then set `TF_VAR_release_trigger=true` in `.env` and apply again.
 
 ## Steps
 
-Every step is *Run a Script* (bash, inline), references the **GitHub releases** feed package `smk762/argus-iris`
-(extracted, reference name `iris-src`), and starts with this prelude:
-
-```bash
-# Octopus defines get_octopusvariable only in this shell, so pass what the scripts need on as environment.
-for v in IRIS_ENV IRIS_TAG IRIS_PORT IRIS_AGENT_NODE HOST_IP IRIS_BROKER_URL IRIS_AGENT_CONTAINERS \
-         IRIS_CONFIG_BODY IRIS_POLICY_BODY IRIS_AGENT_TOKEN ARGUS_GPU_BROKER_TOKEN ARGUS_ADMIN_TOKEN \
-         RAG_CHAT_API_KEY LENS_ADMIN_TOKEN ECHO_ADMIN_TOKEN RESIDENT_ID EVICT_MODE SERVICE_ID WARM_FORCE; do
-  val=$(get_octopusvariable "$v"); [ -n "$val" ] && export "$v=$val"
-done
-export IRIS_IN_OCTOPUS=1 REPO_DIR=$(ls -d "$PWD"/iris-src/*/ | head -n1)
-```
+Every script step is *Run a Script* (bash, inline), references the **GitHub releases** feed package
+`smk762/argus-iris` (extracted, reference name `iris-src`), and starts with a prelude: Octopus defines
+`get_octopusvariable` only in the step's own shell, so it exports what the script needs, then finds the extracted
+source (`Octopus.Action.Package[iris-src].ExtractedPath`, or the one folder inside it) as `REPO_DIR`.
 
 | # | Step | Runs on | Environments | Then |
 |---|---|---|---|---|
@@ -79,8 +72,8 @@ export IRIS_IN_OCTOPUS=1 REPO_DIR=$(ls -d "$PWD"/iris-src/*/ | head -n1)
 | 4 | Deploy broker | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/deploy-broker.sh"` |
 | 5 | Verify | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/verify.sh"` |
 
-Step 2 also references the **GHCR** feed package `smk762/argus-iris` as `argus-iris` (not acquired). Its version is
-the release's version and the release trigger watches it. Step 2, not step 1, because it runs in both environments.
+Step 2 also references the **GHCR** feed package `smk762/argus-iris` as `argus-iris` (not acquired). Its version becomes
+`IRIS_TAG` and the release trigger watches it. Step 2, not step 1, because it runs in both environments.
 
 `render-config.sh` validates the new files with `argus-iris check`, run from the release's own image. A file that
 does not load fails the deployment before the running broker restarts. Approval is needed when admission changes, an

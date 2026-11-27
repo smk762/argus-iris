@@ -1,0 +1,21 @@
+variable "IRIS_AGENT_NODE" {
+    value "#{Octopus.Machine.Name}" {}
+}
+
+variable "IRIS_ENV" {
+    value "#{Octopus.Environment.Name | ToLower}" {}
+}
+
+variable "IRIS_PORT" {
+    value "8120" {
+        environment = ["production"]
+    }
+
+    value "8121" {
+        environment = ["staging"]
+    }
+}
+
+variable "IRIS_TAG" {
+    value "#{Octopus.Action[Render broker config].Package[argus-iris].PackageVersion}" {}
+}

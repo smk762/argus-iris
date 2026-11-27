@@ -1,0 +1,186 @@
+step "deploy-agents" {
+    name = "Deploy agents"
+    properties = {
+        Octopus.Action.MaxParallelism = "1"
+        Octopus.Action.TargetRoles = "iris-agent"
+    }
+
+    action {
+        action_type = "Octopus.Script"
+        environments = ["production"]
+        properties = {
+            Octopus.Action.Script.ScriptBody = <<-EOT
+                # Octopus defines get_octopusvariable only in this shell, so pass what the scripts need on as environment.
+                for v in IRIS_ENV IRIS_TAG IRIS_PORT IRIS_AGENT_NODE HOST_IP IRIS_BROKER_URL IRIS_AGENT_CONTAINERS IRIS_AGENT_TOKEN \
+                         IRIS_AGENT_MANAGE_LABEL IRIS_AGENT_URL; do
+                  val=$(get_octopusvariable "$v"); [ -n "$val" ] && export "$v=$val"
+                done
+                src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")
+                if [ -d "$src/.octopus" ]; then REPO_DIR=$src; else REPO_DIR=$(ls -d "$src"/*/ | head -n1); REPO_DIR=${REPO_DIR%/}; fi
+                export IRIS_IN_OCTOPUS=1 REPO_DIR
+                "$REPO_DIR/.octopus/scripts/deploy-agent.sh"
+                EOT
+            Octopus.Action.Script.ScriptSource = "Inline"
+            Octopus.Action.Script.Syntax = "Bash"
+        }
+        worker_pool_variable = ""
+
+        packages "iris-src" {
+            acquisition_location = "Server"
+            feed = "github-releases"
+            package_id = "smk762/argus-iris"
+            properties = {
+                Extract = "True"
+                Purpose = ""
+                SelectionMode = "immediate"
+            }
+        }
+    }
+}
+
+step "render-broker-config" {
+    name = "Render broker config"
+    properties = {
+        Octopus.Action.TargetRoles = "iris-broker"
+    }
+
+    action {
+        action_type = "Octopus.Script"
+        properties = {
+            Octopus.Action.Script.ScriptBody = <<-EOT
+                for v in IRIS_ENV IRIS_TAG IRIS_CONFIG_B64 IRIS_POLICY_B64; do
+                  val=$(get_octopusvariable "$v"); [ -n "$val" ] && export "$v=$val"
+                done
+                src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")
+                if [ -d "$src/.octopus" ]; then REPO_DIR=$src; else REPO_DIR=$(ls -d "$src"/*/ | head -n1); REPO_DIR=${REPO_DIR%/}; fi
+                export IRIS_IN_OCTOPUS=1 REPO_DIR
+                "$REPO_DIR/.octopus/scripts/render-config.sh"
+                EOT
+            Octopus.Action.Script.ScriptSource = "Inline"
+            Octopus.Action.Script.Syntax = "Bash"
+        }
+        worker_pool_variable = ""
+
+        # The release's image: its version is IRIS_TAG and the release trigger watches it. Only referenced, never
+        # downloaded: docker pulls it on the host.
+        packages "argus-iris" {
+            acquisition_location = "NotAcquired"
+            feed = "ghcr"
+            package_id = "smk762/argus-iris"
+            properties = {
+                Extract = "False"
+                Purpose = ""
+                SelectionMode = "immediate"
+            }
+        }
+
+        packages "iris-src" {
+            acquisition_location = "Server"
+            feed = "github-releases"
+            package_id = "smk762/argus-iris"
+            properties = {
+                Extract = "True"
+                Purpose = ""
+                SelectionMode = "immediate"
+            }
+        }
+    }
+}
+
+step "approve-policy-change" {
+    condition = "Variable"
+    name = "Approve policy change"
+    properties = {
+        Octopus.Step.ConditionVariableExpression = "#{Octopus.Action[Render broker config].Output.NeedsApproval}"
+    }
+
+    action {
+        action_type = "Octopus.Manual"
+        environments = ["production"]
+        properties = {
+            Octopus.Action.Manual.BlockConcurrentDeployments = "True"
+            Octopus.Action.Manual.Instructions = <<-EOT
+                This release changes what the production broker enforces:
+
+                #{Octopus.Action[Render broker config].Output.ApprovalReasons}
+
+                The full diff is in the log of the "Render broker config" step. Approve to restart the broker on it.
+                EOT
+            Octopus.Action.RunOnServer = "false"
+        }
+        worker_pool_variable = ""
+    }
+}
+
+step "deploy-broker" {
+    name = "Deploy broker"
+    properties = {
+        Octopus.Action.TargetRoles = "iris-broker"
+    }
+
+    action {
+        action_type = "Octopus.Script"
+        properties = {
+            Octopus.Action.Script.ScriptBody = <<-EOT
+                for v in IRIS_ENV IRIS_TAG IRIS_PORT HOST_IP IRIS_AGENT_TOKEN ARGUS_GPU_BROKER_TOKEN ARGUS_ADMIN_TOKEN \
+                         RAG_CHAT_API_KEY LENS_ADMIN_TOKEN ECHO_ADMIN_TOKEN; do
+                  val=$(get_octopusvariable "$v"); [ -n "$val" ] && export "$v=$val"
+                done
+                src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")
+                if [ -d "$src/.octopus" ]; then REPO_DIR=$src; else REPO_DIR=$(ls -d "$src"/*/ | head -n1); REPO_DIR=${REPO_DIR%/}; fi
+                export IRIS_IN_OCTOPUS=1 REPO_DIR
+                "$REPO_DIR/.octopus/scripts/deploy-broker.sh"
+                EOT
+            Octopus.Action.Script.ScriptSource = "Inline"
+            Octopus.Action.Script.Syntax = "Bash"
+        }
+        worker_pool_variable = ""
+
+        packages "iris-src" {
+            acquisition_location = "Server"
+            feed = "github-releases"
+            package_id = "smk762/argus-iris"
+            properties = {
+                Extract = "True"
+                Purpose = ""
+                SelectionMode = "immediate"
+            }
+        }
+    }
+}
+
+step "verify" {
+    name = "Verify"
+    properties = {
+        Octopus.Action.TargetRoles = "iris-broker"
+    }
+
+    action {
+        action_type = "Octopus.Script"
+        properties = {
+            Octopus.Action.Script.ScriptBody = <<-EOT
+                for v in IRIS_ENV IRIS_TAG IRIS_PORT HOST_IP; do
+                  val=$(get_octopusvariable "$v"); [ -n "$val" ] && export "$v=$val"
+                done
+                src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")
+                if [ -d "$src/.octopus" ]; then REPO_DIR=$src; else REPO_DIR=$(ls -d "$src"/*/ | head -n1); REPO_DIR=${REPO_DIR%/}; fi
+                export IRIS_IN_OCTOPUS=1 REPO_DIR
+                "$REPO_DIR/.octopus/scripts/verify.sh"
+                EOT
+            Octopus.Action.Script.ScriptSource = "Inline"
+            Octopus.Action.Script.Syntax = "Bash"
+        }
+        worker_pool_variable = ""
+
+        packages "iris-src" {
+            acquisition_location = "Server"
+            feed = "github-releases"
+            package_id = "smk762/argus-iris"
+            properties = {
+                Extract = "True"
+                Purpose = ""
+                SelectionMode = "immediate"
+            }
+        }
+    }
+}

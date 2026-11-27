@@ -3,6 +3,7 @@
 # change needs a person to approve it (#65). Nothing running changes: deploy-broker.sh swaps the files in.
 #   IRIS_ENV=production IRIS_TAG=0.2.3 IRIS_CONFIG_BODY="$(cat iris.yaml)" IRIS_POLICY_BODY="$(cat policy.yaml)" \
 #     .octopus/scripts/render-config.sh
+# Octopus passes IRIS_CONFIG_B64 and IRIS_POLICY_B64 (base64 of each file) instead of the *_BODY pair.
 # Output variables: NeedsApproval (True/False) and ApprovalReasons.
 # shellcheck source=lib.sh source-path=SCRIPTDIR
 source "$(dirname "$0")/lib.sh"
@@ -12,9 +13,14 @@ tag=$(var IRIS_TAG)
 root=$(var IRIS_DEPLOY_ROOT "/srv/argus-iris/$env_name")
 install -d -m 0750 "$root"
 
-# The live config lists LAN hosts and stays out of git; Octopus holds it as a multi-line variable.
-config_body=$(var IRIS_CONFIG_BODY)
-policy_body=$(var IRIS_POLICY_BODY "residents: []")
+# The live config lists LAN hosts and stays out of git. With Config as Code every non-sensitive Octopus variable is
+# committed to this public repo, so Octopus holds both files as sensitive variables, base64 (a sensitive value is one
+# line). By hand, the plain *_BODY form is simpler.
+body() {
+  if [ -n "${!2:-}" ]; then printf '%s' "${!2}" | base64 -d; else var "$1" "${3:-}"; fi
+}
+config_body=$(body IRIS_CONFIG_BODY IRIS_CONFIG_B64)
+policy_body=$(body IRIS_POLICY_BODY IRIS_POLICY_B64 "residents: []")
 printf '%s\n' "$config_body" >"$root/iris.yaml.next"
 printf '%s\n' "$policy_body" >"$root/policy.yaml.next"
 chmod 0640 "$root/iris.yaml.next" "$root/policy.yaml.next"
