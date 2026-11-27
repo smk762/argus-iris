@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import typer
+try:
+    import typer
+except ModuleNotFoundError as exc:
+    if exc.name != "typer":
+        raise
+    raise SystemExit(
+        "The argus-iris command needs the cli extra: "
+        "pip install 'argus-iris[server,cli]' (broker) or 'argus-iris[agent,cli]' (node agent)"
+    ) from None
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="VRAM-aware GPU lease broker for the Argus suite.")
 

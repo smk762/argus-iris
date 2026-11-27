@@ -10,6 +10,10 @@ Notable changes to `argus-iris`. Versions come from git tags via `hatch-vcs`.
 - `argus-iris check` validates a config and policy without starting anything, and says whether the change needs approval: any difference from the deployed config or policy as the broker reads them.
 - `IRIS_REPORT_ONLY=1`: the broker reports and never acts, whatever its config and policy say; the manual warm and evict routes answer 403. `/health` shows `report_only`.
 
+### Fixed
+
+- Without the `cli` extra, the `argus-iris` command says what to install instead of failing with a `typer` import traceback.
+
 ## [0.2.2] - 2026-11-25
 
 Documentation only: the code is the same as 0.2.1.

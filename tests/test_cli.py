@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 
 import pytest
 from typer.testing import CliRunner
@@ -166,3 +168,11 @@ def test_check_asks_for_approval_on_any_difference(tmp_path, monkeypatch) -> Non
     with open(commented[0], "a") as f:
         f.write("# a note\n")
     assert approval(commented) == []
+
+
+def test_without_the_cli_extra_the_command_says_what_to_install() -> None:
+    # A None entry in sys.modules makes the import fail as if typer were not installed.
+    code = "import sys; sys.modules['typer'] = None; import argus_iris.cli"
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert done.returncode == 1
+    assert "argus-iris[server,cli]" in done.stderr and "Traceback" not in done.stderr
