@@ -15,10 +15,13 @@ IRIS_AGENT_MANAGE_LABEL=$(var IRIS_AGENT_MANAGE_LABEL ""); export IRIS_AGENT_MAN
 IRIS_BROKER_URL=$(var IRIS_BROKER_URL ""); export IRIS_BROKER_URL
 IRIS_AGENT_URL=$(var IRIS_AGENT_URL ""); export IRIS_AGENT_URL
 
-# Project argus-iris, as compose.yaml names it: the container that is running now belongs to it, so this replaces it
-# instead of clashing on container_name.
-docker compose -p argus-iris -f "$repo/deploy/agent.compose.yaml" pull iris-agent
-docker compose -p argus-iris -f "$repo/deploy/agent.compose.yaml" up -d iris-agent
+# Replace the running agent in place: reuse the compose project that owns the iris-agent container (argus-iris where
+# the root compose.yaml runs it, iris-agent on hosts set up by hand), else a second project clashes on container_name.
+project=$(docker inspect iris-agent --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)
+project=${project:-argus-iris}
+echo "compose project: $project"
+docker compose -p "$project" -f "$repo/deploy/agent.compose.yaml" pull iris-agent
+docker compose -p "$project" -f "$repo/deploy/agent.compose.yaml" up -d --no-build iris-agent
 
 health=$(wait_health "http://$(local_ip):9110/health" 60)
 version=$(json_get version <<<"$health")

@@ -1,3 +1,9 @@
+variable "IRIS_AGENT_MANAGE_LABEL" {
+    value "1" {
+        environment = ["production"]
+    }
+}
+
 variable "IRIS_AGENT_NODE" {
     value "#{Octopus.Machine.Name}" {}
 }
