@@ -75,8 +75,9 @@ Step 2 also references the **GHCR** feed package `smk762/argus-iris` as `argus-i
 `IRIS_TAG` and the release trigger watches it. Step 2, not step 1, because it runs in both environments.
 
 `render-config.sh` validates the new files with `argus-iris check`, run from the release's own image. A file that
-does not load fails the deployment before the running broker restarts. Approval is needed when admission changes, an
-enforced rule is new or changed, or there is no previous config (the first deployment).
+does not load fails the deployment before the running broker restarts. Approval is needed when the config or policy
+differs at all from the deployed one as the broker reads it, when the deployed files no longer load, or when there is
+no previous config (the first deployment).
 
 ## Runbooks
 

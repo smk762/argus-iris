@@ -132,3 +132,37 @@ def test_check_asks_for_approval_when_the_deployed_file_no_longer_loads(tmp_path
     out = CliRunner().invoke(app, ["check", "-c", new[0], "--policy", new[1], "--previous-config", str(stale)])
     assert out.exit_code == 0, out.output
     assert "does not load" in json.loads(out.stdout)["approval"][0]
+
+
+def test_check_asks_for_approval_on_any_difference(tmp_path, monkeypatch) -> None:
+    import json
+
+    monkeypatch.delenv("IRIS_REPORT_ONLY", raising=False)
+    broad = "  - match: {node: rtx3090}\n    idle_kill: 5m\n    enforce: true\n"
+    narrow = "  - match: {node: rtx3090, ollama: 'llama*'}\n    keepalive: always\n    enforce: true\n"
+    old = _check(tmp_path, "enforce", narrow + broad, "old")
+
+    def approval(new: tuple) -> list[str]:
+        args = ["check", "-c", new[0], "--policy", new[1], "--previous-config", old[0], "--previous-policy", old[1]]
+        out = CliRunner().invoke(app, args)
+        assert out.exit_code == 0, out.output
+        summary = json.loads(out.stdout)
+        assert set(summary) == {"admission", "nodes", "enforced", "approval"}  # the comparison's dumps are not printed
+        return summary["approval"]
+
+    # Rules are first-match: the same two rules the other way round govern differently.
+    assert approval(_check(tmp_path, "enforce", broad + narrow, "swapped")) == ["policy changed: residents"]
+    # A removed rule.
+    assert approval(_check(tmp_path, "enforce", narrow, "fewer")) == ["policy changed: residents"]
+
+    # A config field that lets admission act.
+    reclaim = _check(tmp_path, "enforce", narrow + broad, "reclaim")
+    with open(reclaim[0], "a") as f:
+        f.write("lease_stall_reclaim: true\n")
+    assert approval(reclaim) == ["config changed: lease_stall_reclaim"]
+
+    # A comment is not a difference.
+    commented = _check(tmp_path, "enforce", narrow + broad, "commented")
+    with open(commented[0], "a") as f:
+        f.write("# a note\n")
+    assert approval(commented) == []

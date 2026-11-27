@@ -91,7 +91,7 @@ everything and records `fits`; `enforce` queues, spills and evicts). Step 4's re
 - `.octopus/` — Octopus Deploy (#65): `scripts/` (one per deployment step) and `runbooks/` read plain env only (the
   step's inline prelude exports them), `terraform/` (the Octopus space, OctopusDeploy provider), `project/` (Config
   as Code OCL, written by Octopus). `argus-iris check` validates config and policy and lists what needs approval;
-  `IRIS_REPORT_ONLY` (`config.report_only`) unenforces every rule and forces observe, for the staging broker
+  `IRIS_REPORT_ONLY` (`config.report_only`) unenforces every rule, forces observe and refuses manual warm/evict (403), for the staging broker
   (`deploy/broker.staging.compose.yaml`).
 - `compose.yaml` includes `deploy/broker.compose.yaml` and `deploy/agent.compose.yaml` with `deploy/.env` (project
   `argus-iris`); `deploy/` — example broker config, policy, and the compose files for the broker and the agents.

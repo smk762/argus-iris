@@ -58,8 +58,9 @@ def check(
     """Validate a config and policy with this release's code, without starting anything; print a JSON summary.
 
     With the files deployed now, ``approval`` lists what makes the change need a person to look at it (#65): another
-    admission mode, or an enforced rule that is new or changed. Exits 1 when a new file does not load; a deployed file
-    this release no longer reads cannot be compared, so it needs approval instead.
+    difference at all between the old and the new config or policy, as this release reads them (so a comment or a
+    default spelled out is not one). Exits 1 when a new file does not load; a deployed file this release no longer
+    reads cannot be compared, so it needs approval instead.
     """
     import json  # noqa: PLC0415
 
@@ -70,7 +71,16 @@ def check(
         cfg = load_config(cfg_path)
         pol = load_policy(pol_path) if pol_path else Policy()
         enforced = [r.model_dump(mode="json", exclude_none=True) for r in pol.residents if r.enforce]
-        return {"admission": cfg.admission, "nodes": sorted(cfg.nodes), "enforced": enforced}
+        return {
+            "admission": cfg.admission,
+            "nodes": sorted(cfg.nodes),
+            "enforced": enforced,
+            "_config": cfg.model_dump(mode="json"),
+            "_policy": pol.model_dump(mode="json"),
+        }
+
+    def changed(old: dict, new: dict) -> list[str]:
+        return sorted(k for k in old.keys() | new.keys() if old.get(k) != new.get(k))
 
     try:
         new = summary(config, policy)
@@ -93,6 +103,9 @@ def check(
     elif old is None:
         approval.append("no previous config to compare against")
     else:
+        # Any difference needs a person (#65): rules are first-match, so even a reorder changes what governs a
+        # resident, and config fields such as evict_by or lease_stall_reclaim let admission act. The first two lines
+        # name the changes that matter most; the last two catch everything else.
         if new["admission"] != old["admission"]:
             approval.append(f"admission {old['admission']} -> {new['admission']}")
         approval += [
@@ -100,7 +113,14 @@ def check(
             for r in new["enforced"]
             if r not in old["enforced"]
         ]
-    typer.echo(json.dumps({**new, "approval": approval}, indent=2))
+        config_keys = [k for k in changed(old["_config"], new["_config"]) if k != "admission"]
+        if config_keys:
+            approval.append(f"config changed: {', '.join(config_keys)}")
+        policy_keys = changed(old["_policy"], new["_policy"])
+        if policy_keys:
+            approval.append(f"policy changed: {', '.join(policy_keys)}")
+    shown = {k: v for k, v in new.items() if not k.startswith("_")}
+    typer.echo(json.dumps({**shown, "approval": approval}, indent=2))
 
 
 @app.command()

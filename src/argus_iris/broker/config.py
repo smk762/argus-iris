@@ -221,7 +221,8 @@ class BrokerConfig(BaseModel):
 def report_only() -> bool:
     """``IRIS_REPORT_ONLY``: a broker that reports and never acts, whatever its files say (#65). A staging broker runs
     beside production on the same GPUs with production's config and policy; enforced residency rules act through the
-    adapters (Ollama keep_alive, argus-http evict/warm), not the agent token, so only this keeps it from moving them."""
+    adapters (Ollama keep_alive, argus-http evict/warm), not the agent token, so only this keeps it from moving them.
+    The manual warm and evict routes refuse too."""
     return os.environ.get("IRIS_REPORT_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}
 
 

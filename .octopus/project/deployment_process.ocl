@@ -12,7 +12,7 @@ step "deploy-agents" {
             Octopus.Action.Script.ScriptBody = <<-EOT
                 # Octopus defines get_octopusvariable only in this shell, so pass what the scripts need on as environment.
                 for v in IRIS_ENV IRIS_TAG IRIS_PORT IRIS_AGENT_NODE HOST_IP IRIS_BROKER_URL IRIS_AGENT_CONTAINERS IRIS_AGENT_TOKEN \
-                         IRIS_AGENT_MANAGE_LABEL IRIS_AGENT_URL; do
+                         IRIS_AGENT_MANAGE_LABEL IRIS_AGENT_URL IRIS_AGENT_POLL_S; do
                   val=$(get_octopusvariable "$v"); [ -n "$val" ] && export "$v=$val"
                 done
                 src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")

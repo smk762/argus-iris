@@ -36,12 +36,14 @@ Check a config and policy without starting anything (the deployment pipeline run
 argus-iris check -c iris.yaml --policy policy.yaml --previous-config live/iris.yaml --previous-policy live/policy.yaml
 ```
 
-It prints the admission mode, the nodes and the enforced rules as JSON, and exits 1 when a file does not load. Given
-the files deployed now, `approval` lists what needs a person to look at it: another admission mode, or an enforced
-rule that is new or changed.
+It prints the admission mode, the nodes and the enforced rules as JSON, and exits 1 when a new file does not load.
+Given the files deployed now, `approval` lists what needs a person to look at it: any difference between the old and
+the new config or policy as the broker reads them (a comment or a default spelled out is not one), naming a changed
+admission mode and each enforced rule that is new or changed. A deployed file this release no longer reads cannot be
+compared, so that needs approval too.
 
 `IRIS_REPORT_ONLY=1` makes a broker report and never act: every policy rule is unenforced and admission is `observe`,
-whatever the files say, and `/health` shows `report_only: true`. A staging broker beside production needs it, because
+whatever the files say, the manual warm and evict routes answer 403, and `/health` shows `report_only: true`. A staging broker beside production needs it, because
 enforced rules act through the services' own APIs (Ollama `keep_alive`, argus-http evict and warm), not through the
 agent token. [deploy/broker.staging.compose.yaml](../deploy/broker.staging.compose.yaml) runs one on `:8121`.
 

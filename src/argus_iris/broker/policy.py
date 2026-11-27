@@ -247,6 +247,11 @@ def load_policy(path: str | os.PathLike[str] | None = None) -> Policy:
         return Policy()
     data = yaml.safe_load(Path(path).read_text()) or {}
     policy = Policy.model_validate(data)
-    if report_only():  # every rule reports what it would do; none acts
-        policy.residents = [r.model_copy(update={"enforce": False}) for r in policy.residents]
+    if report_only():
+        unenforce(policy)
     return policy
+
+
+def unenforce(policy: Policy) -> None:
+    """Report-only: every rule still reports what it would do; none acts."""
+    policy.residents = [r.model_copy(update={"enforce": False}) for r in policy.residents]

@@ -294,6 +294,10 @@ def create_app(
         if scheme.lower() != "bearer" or not hmac.compare_digest(presented.encode(), token.encode()):
             raise HTTPException(401, "bad or missing bearer token", headers={"WWW-Authenticate": "Bearer"})
 
+    def refuse_report_only() -> None:
+        if report_only():
+            raise HTTPException(403, "this broker is report-only (IRIS_REPORT_ONLY): it never acts")
+
     @app.post("/services/{service_id}/warm", response_model=WarmResult)
     async def warm(
         service_id: str, force: bool = False, authorization: str | None = Header(default=None)
@@ -301,6 +305,7 @@ def create_app(
         """Bring a service back: start its container through the agent if it is down, then call its warm_path.
         Refused with 409 while the node cannot admit what the service takes warm, unless ``force``."""
         check_caller(authorization, required=True)
+        refuse_report_only()
         try:
             return await warm_service(broker, service_id, force=force)
         except ActionError as exc:
@@ -313,6 +318,7 @@ def create_app(
         """Free a resident's VRAM through its adapter: ``evict`` moves it to the CPU where the service can, ``unload``
         drops it, ``auto`` prefers evict. Refused with 409 while it is busy. Waits to see the memory come back."""
         check_caller(authorization, required=True)
+        refuse_report_only()
         try:
             return await evict_resident(broker, resident_id, mode=mode, reason="manual")
         except ActionError as exc:
