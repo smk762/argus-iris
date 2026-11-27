@@ -120,3 +120,15 @@ def test_check_fails_on_a_bad_file(tmp_path) -> None:
     bad.write_text("admission: sometimes\n")
     out = CliRunner().invoke(app, ["check", "-c", str(bad)])
     assert out.exit_code == 1 and "invalid" in out.stderr
+
+
+def test_check_asks_for_approval_when_the_deployed_file_no_longer_loads(tmp_path, monkeypatch) -> None:
+    import json
+
+    monkeypatch.delenv("IRIS_REPORT_ONLY", raising=False)
+    new = _check(tmp_path, "observe", "  - match: {node: rtx3090}\n    idle_kill: 5m\n", "new")
+    stale = tmp_path / "stale.yaml"
+    stale.write_text("admission: observe\nnodes: {}\na_key_this_release_dropped: 1\n")
+    out = CliRunner().invoke(app, ["check", "-c", new[0], "--policy", new[1], "--previous-config", str(stale)])
+    assert out.exit_code == 0, out.output
+    assert "does not load" in json.loads(out.stdout)["approval"][0]

@@ -32,9 +32,8 @@ script exports the variables and calls one of them (see [Steps](#steps)).
 
    | Target | Environments | Target tags |
    |---|---|---|
-   | morpheus | Staging, Production | `iris-broker`, `iris-agent` |
-   | dragon | Production | `iris-agent` |
-   | jarrah | Production | `iris-agent` |
+   | the broker host | Staging, Production | `iris-broker`, `iris-agent` |
+   | every other GPU host | Production | `iris-agent` |
 
 4. **Variables.** With Config as Code, every non-sensitive variable is committed to this public repo
    ([project/variables.ocl](project/variables.ocl): `IRIS_ENV`, `IRIS_TAG`, `IRIS_PORT`, `IRIS_AGENT_NODE`). Anything
@@ -46,7 +45,7 @@ script exports the variables and calls one of them (see [Steps](#steps)).
    | `IRIS_POLICY_B64` | `base64 -w0 deploy/policy.yaml` | |
    | `HOST_IP` | the LAN address services bind to | per target |
    | `IRIS_BROKER_URL` | the production broker's URL | Production |
-   | `IRIS_AGENT_CONTAINERS` | e.g. `voluptas_comfyui` | per target |
+   | `IRIS_AGENT_CONTAINERS` | e.g. `comfyui` | per target |
    | `IRIS_AGENT_TOKEN`, `ARGUS_GPU_BROKER_TOKEN`, `ARGUS_ADMIN_TOKEN`, `RAG_CHAT_API_KEY`, `LENS_ADMIN_TOKEN`, `ECHO_ADMIN_TOKEN` | | Production only |
 
    Staging gets no secrets on purpose: the staging broker runs with `IRIS_REPORT_ONLY=1` and no tokens, so it can

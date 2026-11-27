@@ -11,11 +11,9 @@ root=$(var IRIS_DEPLOY_ROOT "/srv/argus-iris/$env_name")
 IRIS_TAG=$(var IRIS_TAG); export IRIS_TAG
 HOST_IP=$(var HOST_IP 127.0.0.1); export HOST_IP
 
-[ -f "$root/iris.yaml.next" ] || { echo "nothing rendered in $root: run render-config.sh first" >&2; exit 1; }
-for f in iris.yaml policy.yaml; do
-  [ -f "$root/$f" ] && cp -p "$root/$f" "$root/$f.prev"
-  mv "$root/$f.next" "$root/$f"
-done
+if [ ! -f "$root/iris.yaml.next" ] && [ ! -f "$root/iris.yaml" ]; then
+  echo "nothing rendered in $root: run render-config.sh first" >&2; exit 1
+fi
 export IRIS_CONFIG_FILE="$root/iris.yaml" IRIS_POLICY_FILE="$root/policy.yaml"
 
 case "$env_name" in
@@ -34,4 +32,18 @@ case "$env_name" in
 esac
 
 docker compose -p "$project" -f "$repo/deploy/$file" pull "$service"
-docker compose -p "$project" -f "$repo/deploy/$file" up -d "$service"
+
+# Swap only once the image is here, and file by file, so a retry of this step (a failed pull or up) picks up where it
+# stopped: a file with no .next was already swapped in.
+for f in iris.yaml policy.yaml; do
+  if [ -f "$root/$f.next" ]; then
+    if [ -f "$root/$f" ]; then cp -p "$root/$f" "$root/$f.prev"; fi
+    mv "$root/$f.next" "$root/$f"
+  else
+    echo "$root/$f.next is gone: $f was already swapped in"
+  fi
+done
+
+# Always recreate: each file is bind-mounted by inode, so the mv above leaves a running container on the old one, and
+# compose sees nothing to change when only the files did (the same image, a config-only release).
+docker compose -p "$project" -f "$repo/deploy/$file" up -d --force-recreate "$service"

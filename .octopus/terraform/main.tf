@@ -94,7 +94,7 @@ resource "octopusdeploy_project_group" "argus" {
 resource "octopusdeploy_project" "iris" {
   space_id         = local.space_id
   name             = "argus-iris"
-  description      = "VRAM-aware GPU lease broker: the broker on morpheus, an agent on every GPU node. Issue #65."
+  description      = "VRAM-aware GPU lease broker: the broker on one host, an agent on every GPU node. Issue #65."
   lifecycle_id     = octopusdeploy_lifecycle.iris.id
   project_group_id = octopusdeploy_project_group.argus.id
 

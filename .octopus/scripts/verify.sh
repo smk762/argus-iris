@@ -21,9 +21,9 @@ want=$([ "$env_name" = staging ] && echo true || echo false)
 if [ "$report_only" != "$want" ]; then echo "report_only is $report_only, expected $want" >&2; fail=1; fi
 
 # The first poll can land before every agent answers: give unreachable agents a few polls.
-for _ in 1 2 3 4 5 6; do
+for attempt in 1 2 3 4 5 6 7; do
   down=$(json_get agents <<<"$health" | python3 -c 'import json,sys; print(" ".join(n for n, ok in json.load(sys.stdin).items() if not ok))')
-  [ -z "$down" ] && break
+  if [ -z "$down" ] || [ "$attempt" = 7 ]; then break; fi
   sleep 5
   health=$(curl -fsS --max-time 3 "$url/health")
 done

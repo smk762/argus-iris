@@ -58,7 +58,8 @@ def check(
     """Validate a config and policy with this release's code, without starting anything; print a JSON summary.
 
     With the files deployed now, ``approval`` lists what makes the change need a person to look at it (#65): another
-    admission mode, or an enforced rule that is new or changed. Exits 1 when a file does not load.
+    admission mode, or an enforced rule that is new or changed. Exits 1 when a new file does not load; a deployed file
+    this release no longer reads cannot be compared, so it needs approval instead.
     """
     import json  # noqa: PLC0415
 
@@ -73,12 +74,23 @@ def check(
 
     try:
         new = summary(config, policy)
-        old = summary(previous_config, previous_policy) if previous_config and previous_config.exists() else None
     except Exception as exc:  # noqa: BLE001 - any load failure is the answer, printed for the deploy log
         typer.echo(f"invalid: {exc}", err=True)
         raise typer.Exit(1) from exc
     approval: list[str] = []
-    if old is None:
+    old = None
+    unreadable = False
+    if previous_config and previous_config.exists():
+        # The deployed files were written for the release running now. One this release no longer reads (a removed
+        # key, a policy file that was never written) must not block the deployment that replaces it.
+        try:
+            old = summary(previous_config, previous_policy if previous_policy and previous_policy.exists() else None)
+        except Exception as exc:  # noqa: BLE001
+            unreadable = True
+            typer.echo(f"previous files do not load: {exc}", err=True)
+    if unreadable:
+        approval.append("the deployed config or policy does not load with this release: nothing to compare against")
+    elif old is None:
         approval.append("no previous config to compare against")
     else:
         if new["admission"] != old["admission"]:
