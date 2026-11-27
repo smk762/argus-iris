@@ -124,6 +124,7 @@ data "octopusdeploy_channels" "iris" {
 
 # A new image version on GHCR creates a release, so the release never races the image build.
 resource "octopusdeploy_external_feed_create_release_trigger" "ghcr" {
+  provider   = octopusdeploy.argus
   count      = var.release_trigger ? 1 : 0
   space_id   = local.space_id
   name       = "New argus-iris image"

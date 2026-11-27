@@ -14,3 +14,12 @@ provider "octopusdeploy" {
   address = var.octopus_url
   api_key = var.octopus_api_key
 }
+
+# The same instance, defaulting to the Argus space. The release trigger's read ignores its own space_id and asks the
+# provider's default space (provider 1.21.2 and main as of 2026-11-27), which a key scoped to Argus may not read.
+provider "octopusdeploy" {
+  alias    = "argus"
+  address  = var.octopus_url
+  api_key  = var.octopus_api_key
+  space_id = local.space_id
+}
