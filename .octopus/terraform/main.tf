@@ -100,7 +100,7 @@ resource "octopusdeploy_project" "iris" {
     git_credential_id  = octopusdeploy_git_credential.github.id
     url                = var.github_repo
     base_path          = ".octopus/project" # Octopus writes its OCL here, apart from the scripts
-    default_branch     = "dev"
+    default_branch     = var.git_default_branch
     protected_branches = ["dev", "main"]
   }
 

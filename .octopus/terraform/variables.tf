@@ -32,6 +32,12 @@ variable "github_token" {
   sensitive   = true
 }
 
+variable "git_default_branch" {
+  description = "Branch Octopus reads the process from. Converting the project to Git commits its first OCL there, and dev is protected (in Octopus and on GitHub), so bootstrap on a feature branch, merge it, then switch to dev."
+  type        = string
+  default     = "dev"
+}
+
 variable "release_trigger" {
   description = "Create the GHCR release trigger. Leave false until the process has its first step: the trigger names that step's package."
   type        = bool
