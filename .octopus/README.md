@@ -15,15 +15,17 @@ script exports the variables and calls one of them (see [Steps](#steps)).
 
 ## Setup, in order
 
-1. **Instance.** Create an Octopus Cloud instance. Make an API key for your user (Profile → My API keys).
+1. **Instance.** Create an Octopus Cloud instance. Skip the signup's *Add New Project*: Terraform creates the project
+   in its own space, with Git storage. Make an API key (Profile → My API keys) with *Full access*: Terraform creates
+   a space, a system-level permission, and a custom scope can only name spaces that already exist. Give it an expiry.
 2. **Terraform.** Create a fine-grained GitHub token for this repository only, with *Contents: read and write*.
    ```bash
    cd .octopus/terraform
-   cp example.tfvars local.tfvars          # your instance URL and user id
-   export TF_VAR_octopus_api_key=… TF_VAR_github_token=…
-   terraform init && terraform apply -var-file=local.tfvars
+   cp .env.example .env                    # instance URL, API key, your user id, GitHub token
+   set -a; . ./.env; set +a
+   terraform init && terraform apply
    ```
-   State holds the GitHub token; it stays local and out of git.
+   `.env` and the state hold both secrets; they stay local and out of git.
 3. **Tentacles.** On each host: Infrastructure → Deployment Targets → Add → Linux → *Polling Tentacle*, and run the
    script it generates. Name the target after the node, as the broker config does. Only outbound connections, so no
    inbound ports.
@@ -52,7 +54,7 @@ script exports the variables and calls one of them (see [Steps](#steps)).
    Staging gets no secrets on purpose: the staging broker runs with `IRIS_REPORT_ONLY=1` and no tokens, so it can
    read everything and change nothing.
 
-5. **Process** (see [Steps](#steps)), then set `release_trigger = true` in `local.tfvars` and apply again.
+5. **Process** (see [Steps](#steps)), then set `TF_VAR_release_trigger=true` in `.env` and apply again.
 
 ## Steps
 
