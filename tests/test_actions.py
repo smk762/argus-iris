@@ -249,3 +249,27 @@ async def test_a_non_object_refusal_from_the_agent_is_an_action_error(body) -> N
     svc = next(s for s in broker.config.services if s.id == "comfyui")
     with pytest.raises(ActionError, match="refused to stop imagegen_comfyui: HTTP 403"):
         await container_action(broker, svc, "stop")
+
+
+def test_report_only_refuses_manual_actions(monkeypatch) -> None:
+    monkeypatch.setenv("ARGUS_GPU_BROKER_TOKEN", "caller-tok")
+    monkeypatch.setenv("IRIS_REPORT_ONLY", "1")
+    world = World()
+    auth = {"Authorization": "Bearer caller-tok"}
+    with TestClient(create_app(broker=broker_for(world), poll=False)) as client:
+        assert client.post("/services/comfyui/warm").status_code == 401  # the token is still checked first
+        for path in ("/services/comfyui/warm", "/residents/rtx3090/comfyui/evict"):
+            r = client.post(path, headers=auth)
+            assert r.status_code == 403 and "report-only" in r.json()["detail"]
+        assert client.get("/health").json()["report_only"] is True
+
+
+def test_report_only_applies_to_a_config_built_in_code(monkeypatch) -> None:
+    from argus_iris.broker.policy import Policy
+
+    monkeypatch.setenv("IRIS_REPORT_ONLY", "1")
+    config = BrokerConfig.model_validate({**CONFIG, "admission": "enforce"})
+    policy = Policy.model_validate({"residents": [{"match": {"node": "rtx3090"}, "idle_kill": "5m", "enforce": True}]})
+    broker = Broker(config, policy=policy)
+    assert broker.config.admission == "observe"
+    assert not broker.policy.residents[0].enforce and broker.policy.residents[0].idle_kill == 300

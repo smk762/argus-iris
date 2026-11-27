@@ -1,0 +1,37 @@
+# argus-iris staging broker (#65): a second broker beside production, on the same host and GPUs, that reports and never
+# acts. Octopus deploys it as project argus-iris-staging; by hand:
+#   IRIS_CONFIG_FILE=… IRIS_POLICY_FILE=… docker compose -p argus-iris-staging -f deploy/broker.staging.compose.yaml up -d
+#
+# What keeps it harmless, and why each is needed:
+# - IRIS_REPORT_ONLY=1: every policy rule unenforced and admission observe, whatever the files say. Enforced rules act
+#   through the adapters (Ollama keep_alive, argus-http evict/warm), not the agent token.
+# - No tokens at all: no IRIS_AGENT_TOKEN (no container start/stop), no ARGUS_GPU_BROKER_TOKEN (warm/evict routes off),
+#   no service tokens (reads are open).
+# - No argus.peer label: production's directory would otherwise list it as a second `iris`.
+# - Its own container name, port and state volume, so it never replaces or shares production's.
+#
+# What it does not check: with no service tokens, adapters whose service wants one read as unauthorized here, and
+# Octopus's Verify step looks only at the version, report_only and the agents. Staging catches a bad image, config or
+# policy; it says nothing about whether the service adapters work.
+services:
+  argus-iris-staging:
+    image: ghcr.io/smk762/argus-iris:${IRIS_TAG:?the release being staged}
+    container_name: argus-iris-staging
+    command: ["argus-iris", "serve"]
+    restart: unless-stopped
+    ports:
+      - "${HOST_IP:-127.0.0.1}:${IRIS_STAGING_PORT:-8121}:8120"
+    volumes:
+      - ${IRIS_CONFIG_FILE:?rendered broker config}:/etc/argus-iris/iris.yaml:ro
+      - ${IRIS_POLICY_FILE:?rendered policy}:/etc/argus-iris/policy.yaml:ro
+      - iris-staging-state:/var/lib/argus-iris
+    environment:
+      IRIS_CONFIG: /etc/argus-iris/iris.yaml
+      IRIS_POLICY: /etc/argus-iris/policy.yaml
+      IRIS_STATE_DIR: /var/lib/argus-iris
+      IRIS_REPORT_ONLY: "1"
+      ARGUS_PEER: iris-staging
+      ARGUS_ENV_FILE: "off"     # never the suite file: it holds production's tokens
+
+volumes:
+  iris-staging-state: {}
