@@ -61,8 +61,6 @@ step "render-broker-config" {
         }
         worker_pool_variable = ""
 
-        # The release's image: its version is IRIS_TAG and the release trigger watches it. Only referenced, never
-        # downloaded: docker pulls it on the host.
         packages "argus-iris" {
             acquisition_location = "NotAcquired"
             feed = "ghcr"
