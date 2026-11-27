@@ -75,3 +75,48 @@ def test_binds_to_localhost_unless_overridden(tmp_path, monkeypatch, command, ov
     result = CliRunner().invoke(app, [command])
     assert result.exit_code == 0, result.output
     assert bound["host"] == (override or "127.0.0.1")
+
+
+def _check(tmp_path, admission: str, rules: str, name: str) -> tuple:
+    config, policy = tmp_path / f"{name}.yaml", tmp_path / f"{name}-policy.yaml"
+    config.write_text(f"admission: {admission}\nnodes:\n  rtx3090: {{agent_url: 'http://192.0.2.10:9110'}}\n")
+    policy.write_text(f"residents:\n{rules}")
+    return str(config), str(policy)
+
+
+def test_check_flags_admission_and_newly_enforced_rules(tmp_path, monkeypatch) -> None:
+    import json
+
+    monkeypatch.delenv("IRIS_REPORT_ONLY", raising=False)
+    quiet = "  - match: {node: rtx3090}\n    idle_kill: 5m\n"
+    loud = quiet + "    enforce: true\n"
+    old = _check(tmp_path, "observe", quiet, "old")
+    run = CliRunner().invoke
+
+    same = run(
+        app, ["check", "-c", old[0], "--policy", old[1], "--previous-config", old[0], "--previous-policy", old[1]]
+    )
+    assert same.exit_code == 0 and json.loads(same.stdout)["approval"] == []
+
+    new = _check(tmp_path, "enforce", loud, "new")
+    out = run(
+        app, ["check", "-c", new[0], "--policy", new[1], "--previous-config", old[0], "--previous-policy", old[1]]
+    )
+    approval = json.loads(out.stdout)["approval"]
+    assert approval[0] == "admission observe -> enforce" and "enforced rule" in approval[1]
+
+    # Already enforced and unchanged: nothing to approve.
+    again = run(
+        app, ["check", "-c", new[0], "--policy", new[1], "--previous-config", new[0], "--previous-policy", new[1]]
+    )
+    assert json.loads(again.stdout)["approval"] == []
+
+    first = run(app, ["check", "-c", new[0], "--policy", new[1], "--previous-config", str(tmp_path / "none.yaml")])
+    assert json.loads(first.stdout)["approval"] == ["no previous config to compare against"]
+
+
+def test_check_fails_on_a_bad_file(tmp_path) -> None:
+    bad = tmp_path / "iris.yaml"
+    bad.write_text("admission: sometimes\n")
+    out = CliRunner().invoke(app, ["check", "-c", str(bad)])
+    assert out.exit_code == 1 and "invalid" in out.stderr

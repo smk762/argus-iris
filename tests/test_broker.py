@@ -187,6 +187,7 @@ def test_http_api() -> None:
         # Every field /health had before argus-cortex's ServiceHealth, with the same meaning.
         assert health["status"] == "ok" and health["version"] == argus_iris.__version__
         assert {"polls", "leases", "pins_missing", "crowded_out", "registered"} <= set(health)
+        assert health["report_only"] is False
         assert health["leases"] == {"active": 0, "tenants": 0}
         assert set(health["registered"]) == {"tenants", "services", "nodes"}
         # And it is the suite's contract: who it is, the wire versions it speaks, its dependency checks.
@@ -225,6 +226,17 @@ def test_config_validation(tmp_path: Path) -> None:
     cfg = load_config(path)
     assert cfg.nodes["gtx1070"].agent_url == "http://gtx1070:9110"
     assert cfg.nodes["gtx1070"].headroom_mb == 512
+
+
+def test_report_only_forces_observe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "iris.yaml"
+    path.write_text("admission: enforce\nnodes:\n  gtx1070: { agent_url: 'http://gtx1070:9110' }\n")
+    monkeypatch.delenv("IRIS_REPORT_ONLY", raising=False)
+    assert load_config(path).admission == "enforce"
+    monkeypatch.setenv("IRIS_REPORT_ONLY", "1")
+    assert load_config(path).admission == "observe"
+    monkeypatch.setenv("IRIS_REPORT_ONLY", "0")
+    assert load_config(path).admission == "enforce"
 
 
 def test_example_config_loads() -> None:

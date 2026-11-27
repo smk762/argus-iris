@@ -4,6 +4,12 @@ Notable changes to `argus-iris`. Versions come from git tags via `hatch-vcs`.
 
 ## [Unreleased]
 
+### Added
+
+- **Octopus Deploy** (#65). [.octopus/](.octopus/README.md) has the scripts each step and runbook runs, and Terraform for the Octopus space: environments, lifecycle, feeds and project. Staging is a report-only broker on `:8121` ([deploy/broker.staging.compose.yaml](deploy/broker.staging.compose.yaml)).
+- `argus-iris check` validates a config and policy without starting anything, and says whether the change needs approval: another admission mode, or an enforced rule that is new or changed.
+- `IRIS_REPORT_ONLY=1`: the broker reports and never acts, whatever its config and policy say. `/health` shows `report_only`.
+
 ## [0.2.2] - 2026-11-25
 
 Documentation only: the code is the same as 0.2.1.

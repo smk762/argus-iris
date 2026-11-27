@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 
 import argus_iris
 from argus_iris.broker.actions import ActionError, EvictMode, EvictResult, WarmResult, evict_resident, warm_service
-from argus_iris.broker.config import BrokerConfig, load_config
+from argus_iris.broker.config import BrokerConfig, load_config, report_only
 from argus_iris.broker.leases import LeaseConflict, LeaseRecord
 from argus_iris.broker.policy import Policy, load_policy
 from argus_iris.broker.registry import RegistrationError
@@ -219,6 +219,7 @@ def create_app(
     def own_health() -> dict:
         return {
             "mode": "observe-only" if config.admission == "observe" else "admission",
+            "report_only": report_only(),
             "polls": broker.polls,
             "leases": {"active": len(broker.leases.active()), "tenants": len(broker.leases.tenants)},
             "agents": {name: s.reachable for name, s in broker.nodes.items()},

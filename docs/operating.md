@@ -30,6 +30,26 @@ The broker, on one host (see [deploy/iris.example.yaml](../deploy/iris.example.y
 argus-iris serve --config iris.yaml   # :8120 — /nodes, /residents, /leases, /tenants, /events, /metrics, /health
 ```
 
+Check a config and policy without starting anything (the deployment pipeline runs this in the release's image):
+
+```bash
+argus-iris check -c iris.yaml --policy policy.yaml --previous-config live/iris.yaml --previous-policy live/policy.yaml
+```
+
+It prints the admission mode, the nodes and the enforced rules as JSON, and exits 1 when a file does not load. Given
+the files deployed now, `approval` lists what needs a person to look at it: another admission mode, or an enforced
+rule that is new or changed.
+
+`IRIS_REPORT_ONLY=1` makes a broker report and never act: every policy rule is unenforced and admission is `observe`,
+whatever the files say, and `/health` shows `report_only: true`. A staging broker beside production needs it, because
+enforced rules act through the services' own APIs (Ollama `keep_alive`, argus-http evict and warm), not through the
+agent token. [deploy/broker.staging.compose.yaml](../deploy/broker.staging.compose.yaml) runs one on `:8121`.
+
+### Octopus Deploy
+
+[.octopus/](../.octopus/README.md) deploys the broker and the agents through Octopus Deploy: a report-only staging
+broker first, then production, with the image pinned per release and runbooks for evict, warm, restart and health.
+
 ### Adding a service or a GPU host
 
 A service needs two settings: `ARGUS_GPU_BROKER_URL=http://<broker>:8120` and `ARGUS_GPU_BROKER_TOKEN`. With

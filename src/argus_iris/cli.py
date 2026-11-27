@@ -49,6 +49,49 @@ def agent(
 
 
 @app.command()
+def check(
+    config: Path = typer.Option(..., "--config", "-c", help="Broker YAML config to validate."),
+    policy: Path = typer.Option(None, "--policy", help="Residency policy YAML to validate."),
+    previous_config: Path = typer.Option(None, help="The config deployed now, to compare against."),
+    previous_policy: Path = typer.Option(None, help="The policy deployed now, to compare against."),
+) -> None:
+    """Validate a config and policy with this release's code, without starting anything; print a JSON summary.
+
+    With the files deployed now, ``approval`` lists what makes the change need a person to look at it (#65): another
+    admission mode, or an enforced rule that is new or changed. Exits 1 when a file does not load.
+    """
+    import json  # noqa: PLC0415
+
+    from argus_iris.broker.config import load_config  # noqa: PLC0415
+    from argus_iris.broker.policy import Policy, load_policy  # noqa: PLC0415
+
+    def summary(cfg_path: Path, pol_path: Path | None) -> dict:
+        cfg = load_config(cfg_path)
+        pol = load_policy(pol_path) if pol_path else Policy()
+        enforced = [r.model_dump(mode="json", exclude_none=True) for r in pol.residents if r.enforce]
+        return {"admission": cfg.admission, "nodes": sorted(cfg.nodes), "enforced": enforced}
+
+    try:
+        new = summary(config, policy)
+        old = summary(previous_config, previous_policy) if previous_config and previous_config.exists() else None
+    except Exception as exc:  # noqa: BLE001 - any load failure is the answer, printed for the deploy log
+        typer.echo(f"invalid: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    approval: list[str] = []
+    if old is None:
+        approval.append("no previous config to compare against")
+    else:
+        if new["admission"] != old["admission"]:
+            approval.append(f"admission {old['admission']} -> {new['admission']}")
+        approval += [
+            f"enforced rule new or changed: {json.dumps(r['match'])}"
+            for r in new["enforced"]
+            if r not in old["enforced"]
+        ]
+    typer.echo(json.dumps({**new, "approval": approval}, indent=2))
+
+
+@app.command()
 def version() -> None:
     """Print the version."""
     import argus_iris  # noqa: PLC0415

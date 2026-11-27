@@ -218,9 +218,19 @@ class BrokerConfig(BaseModel):
         return [s for s in self.services if s.node == node]
 
 
+def report_only() -> bool:
+    """``IRIS_REPORT_ONLY``: a broker that reports and never acts, whatever its files say (#65). A staging broker runs
+    beside production on the same GPUs with production's config and policy; enforced residency rules act through the
+    adapters (Ollama keep_alive, argus-http evict/warm), not the agent token, so only this keeps it from moving them."""
+    return os.environ.get("IRIS_REPORT_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def load_config(path: str | os.PathLike[str] | None = None) -> BrokerConfig:
     path = path or os.environ.get("IRIS_CONFIG")
     if not path:
         raise RuntimeError("no broker config: pass --config or set IRIS_CONFIG")
     data = yaml.safe_load(Path(path).read_text()) or {}
-    return BrokerConfig.model_validate(data)
+    config = BrokerConfig.model_validate(data)
+    if report_only():
+        config.admission = "observe"
+    return config

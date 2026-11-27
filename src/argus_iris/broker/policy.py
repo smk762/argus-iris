@@ -26,7 +26,7 @@ residents:                           # first matching rule wins; ids/models/serv
     restart_host_ram_mb: 12288       # idle 2 min (restart_host_ram_idle) with > 12 GiB host RAM: restart it
 ```
 
-Each rule acts only with ``enforce: true``, so residents are handed over one at a time (#6): turn a resident's own
+Each rule acts only with ``enforce: true`` (and never under ``IRIS_REPORT_ONLY``, see :func:`.config.report_only`), so residents are handed over one at a time (#6): turn a resident's own
 timer to -1 and set ``enforce`` in the same change. Without it, the dashboard shows what iris would do.
 
 Cron is the five standard fields (``*``, numbers, ranges, lists, ``*/n`` and ``a-b/n``; day-of-week 0-7 with 0 and 7
@@ -49,6 +49,7 @@ import yaml
 from argus_cortex.gpu_wire import PriorityClass
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, field_validator
 
+from argus_iris.broker.config import report_only
 from argus_iris.models import Resident
 
 _DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(s|m|h|d)?\s*$")
@@ -245,4 +246,7 @@ def load_policy(path: str | os.PathLike[str] | None = None) -> Policy:
     if not path:
         return Policy()
     data = yaml.safe_load(Path(path).read_text()) or {}
-    return Policy.model_validate(data)
+    policy = Policy.model_validate(data)
+    if report_only():  # every rule reports what it would do; none acts
+        policy.residents = [r.model_copy(update={"enforce": False}) for r in policy.residents]
+    return policy
