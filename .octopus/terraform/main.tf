@@ -61,6 +61,10 @@ resource "octopusdeploy_docker_container_registry" "ghcr" {
   name        = "GHCR"
   feed_uri    = "https://ghcr.io"
   api_version = "v2"
+  # The image is public, but Octopus first asks GHCR for a token without naming a repository, which GHCR refuses
+  # anonymously (403). Any GitHub token passes; this one only needs to exist.
+  username = var.github_username
+  password = var.github_token
 }
 
 # The deploy files (compose files, .octopus/scripts) at the same version: a release tag's source archive.
