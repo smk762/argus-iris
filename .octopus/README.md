@@ -65,14 +65,17 @@ source (`Octopus.Action.Package[iris-src].ExtractedPath`, or the one folder insi
 
 | # | Step | Runs on | Environments | Then |
 |---|---|---|---|---|
-| 1 | Deploy agents | tag `iris-agent`, rolling, window 1 | Production | `"$REPO_DIR/.octopus/scripts/deploy-agent.sh"` |
-| 2 | Render broker config | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/render-config.sh"` |
-| 3 | Approve policy change | Manual intervention; run condition `#{Octopus.Action[Render broker config].Output.NeedsApproval}`; instructions show `#{Octopus.Action[Render broker config].Output.ApprovalReasons}` | Production | |
+| 1 | Render broker config | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/render-config.sh"` |
+| 2 | Approve policy change | Manual intervention; run condition `#{Octopus.Action[Render broker config].Output.NeedsApproval}`; instructions show `#{Octopus.Action[Render broker config].Output.ApprovalReasons}` | Production | |
+| 3 | Deploy agents | tag `iris-agent`, rolling, window 1 | Production | `"$REPO_DIR/.octopus/scripts/deploy-agent.sh"` |
 | 4 | Deploy broker | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/deploy-broker.sh"` |
 | 5 | Verify | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/verify.sh"` |
 
-Step 2 also references the **GHCR** feed package `smk762/argus-iris` as `argus-iris` (not acquired). Its version becomes
-`IRIS_TAG` and the release trigger watches it. Step 2, not step 1, because it runs in both environments.
+Step 1 also references the **GHCR** feed package `smk762/argus-iris` as `argus-iris` (not acquired). Its version becomes
+`IRIS_TAG` and the release trigger watches it.
+
+Nothing on a host changes before the approval: step 1 only writes `.next` files beside the deployed ones. A rejected
+change therefore leaves the agents and the broker on the release they were running.
 
 `render-config.sh` validates the new files with `argus-iris check`, run from the release's own image. A file that
 does not load fails the deployment before the running broker restarts. Approval is needed when the config or policy

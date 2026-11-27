@@ -9,6 +9,10 @@
 #   no service tokens (reads are open).
 # - No argus.peer label: production's directory would otherwise list it as a second `iris`.
 # - Its own container name, port and state volume, so it never replaces or shares production's.
+#
+# What it does not check: with no service tokens, adapters whose service wants one read as unauthorized here, and
+# Octopus's Verify step looks only at the version, report_only and the agents. Staging catches a bad image, config or
+# policy; it says nothing about whether the service adapters work.
 services:
   argus-iris-staging:
     image: ghcr.io/smk762/argus-iris:${IRIS_TAG:?the release being staged}
