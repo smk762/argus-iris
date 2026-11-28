@@ -4,6 +4,10 @@ Notable changes to `argus-iris`. Versions come from git tags via `hatch-vcs`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Octopus deploys no longer finish "with warnings" on a host where the broker and the agent share a compose project: compose reported each as the other's orphan.
+
 ## [0.2.4] - 2026-11-28
 
 Deployment tooling only: the package code is the same as 0.2.3.
