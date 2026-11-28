@@ -51,6 +51,7 @@ agent token. [deploy/broker.staging.compose.yaml](../deploy/broker.staging.compo
 
 [.octopus/](../.octopus/README.md) deploys the broker and the agents through Octopus Deploy: a report-only staging
 broker first, then production, with the image pinned per release and runbooks for evict, warm, restart and health.
+The [write-up](https://dragonhound.dev/updates/2026-11-28-iris-octopus-deploy/) covers what it replaced, what was tested and what it cost.
 
 ### Adding a service or a GPU host
 
