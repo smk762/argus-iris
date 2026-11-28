@@ -31,6 +31,8 @@ fi
 
 # Validated by the code that will read it, so a bad file fails here and the running broker is never restarted onto
 # it. A clean environment: IRIS_REPORT_ONLY would hide the enforced rules this compares.
+# Docker writes pull progress to stderr, which Octopus logs as errors: pull quietly first, so only real errors reach it.
+docker pull --quiet "ghcr.io/smk762/argus-iris:$tag" >/dev/null
 summary=$(docker run --rm --entrypoint argus-iris -v "$root:/cfg:ro" -e ARGUS_ENV_FILE=off \
   "ghcr.io/smk762/argus-iris:$tag" check -c /cfg/iris.yaml.next --policy /cfg/policy.yaml.next \
   --previous-config /cfg/iris.yaml --previous-policy /cfg/policy.yaml)

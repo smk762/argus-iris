@@ -31,7 +31,7 @@ case "$env_name" in
   *) echo "unknown environment: $env_name" >&2; exit 2 ;;
 esac
 
-docker compose -p "$project" -f "$repo/deploy/$file" pull "$service"
+docker compose --progress quiet -p "$project" -f "$repo/deploy/$file" pull "$service"
 
 # Swap only once the image is here, and file by file, so a retry of this step (a failed pull or up) picks up where it
 # stopped: a file with no .next was already swapped in.
@@ -46,4 +46,4 @@ done
 
 # Always recreate: each file is bind-mounted by inode, so the mv above leaves a running container on the old one, and
 # compose sees nothing to change when only the files did (the same image, a config-only release).
-docker compose -p "$project" -f "$repo/deploy/$file" up -d --force-recreate "$service"
+docker compose --progress quiet -p "$project" -f "$repo/deploy/$file" up -d --force-recreate "$service"
