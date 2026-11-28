@@ -6,5 +6,5 @@ connectivity_policy {
 }
 
 versioning_strategy {
-    template = "#{Octopus.Action[Render broker config].Package[argus-iris].PackageVersion}.#{Octopus.Version.NextRevision}"
+    template = "#{Octopus.Version.LastMajor}.#{Octopus.Version.LastMinor}.#{Octopus.Version.NextPatch}"
 }
