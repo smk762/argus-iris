@@ -226,6 +226,12 @@ class Directory:
                     probe_base[self._key(entry)] = f"http://127.0.0.1:{private}"
         self._refused = refused
         self._probe_base = probe_base
+        # A container recreated under its name at another address (port, argus.health path) is a new entry: the old
+        # address's health says nothing about it, and kept, it would rank the entry and hold off its probe.
+        was = {self._key(e): (e.url, e.health_path) for e in self.entries}
+        for e in entries:
+            if was.get(self._key(e), (e.url, e.health_path)) != (e.url, e.health_path):
+                self._health.pop(self._key(e), None)
         entries = [self._with_health(e) for e in entries]
         keys = {self._key(e) for e in entries}
         self._health = {k: h for k, h in self._health.items() if k in keys}

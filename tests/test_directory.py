@@ -408,3 +408,30 @@ async def test_a_rebuild_during_a_probe_drops_results_that_no_longer_apply() -> 
     assert d.entries[0].url.endswith(":8999") and d.entries[0].health is None
     await probe_then(here)  # rebuilt, unchanged: the live entry gets the result
     assert d.entries[0].health.status == "ok"
+
+
+async def test_a_rebuild_at_another_address_forgets_the_old_health_and_probes_it_next() -> None:
+    calls: list[str] = []
+
+    def svc(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"status": "ok"})
+
+    d = directory()
+    d._client = httpx.AsyncClient(transport=httpx.MockTransport(svc))
+    here = {"rtx3090": [c("lens", (8100, 8100), labels={"argus.peer": "lens"})]}
+    d.rebuild(here)
+    await d.probe()
+    assert d.entries[0].health.status == "ok" and len(calls) == 1
+    d.rebuild(here)  # unchanged: its health is kept and it is not due again
+    await d.probe()
+    assert d.entries[0].health.status == "ok" and len(calls) == 1
+    for moved in (
+        {"rtx3090": [c("lens", (8100, 8200), labels={"argus.peer": "lens"})]},  # another published port
+        {"rtx3090": [c("lens", (8100, 8200), labels={"argus.peer": "lens", "argus.health": "/healthz"})]},  # path
+    ):
+        d.rebuild(moved)
+        assert d.entries[0].health is None  # never ranked by the old address's answer
+        await d.probe()  # read on the next call, not a whole interval later
+        assert calls[-1] == f"{d.entries[0].url}{d.entries[0].health_path}" and d.entries[0].health.status == "ok"
+    assert len(calls) == 3

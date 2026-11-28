@@ -7,6 +7,8 @@ Notable changes to `argus-iris`. Versions come from git tags via `hatch-vcs`.
 ### Fixed
 
 - Octopus deploys no longer finish "with warnings" on a host where the broker and the agent share a compose project: compose reported each as the other's orphan.
+- A directory entry recreated at another address (published port or `argus.health` path) no longer keeps the old address's health: it is ranked as unread and probed on the next round instead of a whole `directory_health_s` later.
+- The dashboard clears the summary card and GPU count when the registry forgets the last node.
 
 ## [0.2.4] - 2026-11-28
 
