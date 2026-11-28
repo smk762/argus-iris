@@ -152,6 +152,39 @@ def test_a_stale_registry_read_neither_drops_a_new_node_nor_overwrites_newer_dat
     assert out["last"] == out["services"] == out["nodes"] == ["a", "new"]
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run app.js's registry reads")
+def test_forgetting_the_last_node_clears_its_summary() -> None:
+    """With no node left, no renderNode runs to refresh the summary: the read must render it itself."""
+    src = (resources.files("argus_iris") / "ui" / "app.js").read_text()
+    body = src[src.index("let registryTimer") : src.index("function scheduleRegistry")]
+    handler = src[src.index("    node: (e) => {") : src.index("  });\n}\nboot();")]
+    script = "\n".join(
+        [
+            "const api = (p) => p, $ = () => null, fill = () => {}, noRows = () => {};",
+            "let services = null, registry = null, directory = null;",
+            "const nodes = new Map(), order = [], document = { getElementById: () => null };",
+            "const renderRegistry = () => {}, renderSuite = renderRegistry, renderAgents = renderRegistry;",
+            "const renderNode = renderRegistry, scheduleRegistry = () => {};",
+            "const summaries = [];",
+            "const renderSummary = () => summaries.push([...nodes.keys()]);",
+            "const fetch = (p) => Promise.resolve({ ok: true,",
+            "  json: async () => (p === 'registry' ? { nodes: [] } : []) });",
+            body,
+            "const handlers = {",
+            handler,
+            "};",
+            "(async () => {",
+            "  handlers.node({ data: JSON.stringify({ name: 'only', services: [] }) });",
+            "  summaries.length = 0;",
+            "  await loadRegistry();",  # the registry no longer lists it
+            "  console.log(JSON.stringify({ nodes: [...nodes.keys()], summaries }));",
+            "})();",
+        ]
+    )
+    out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert out["nodes"] == [] and out["summaries"] == [[]]
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run app.js's snippets")
 @pytest.mark.parametrize(
     ("page", "broker"),

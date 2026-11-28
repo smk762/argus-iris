@@ -534,6 +534,7 @@ async function loadRegistry() {
   renderRegistry();
   renderSuite();
   renderAgents();
+  renderSummary(); // a forgotten last node leaves no renderNode below to clear its summary card and GPU count
   for (const s of nodes.values()) renderNode(s); // origins, warm buttons and colours follow the registry
 }
 function scheduleRegistry(ms = 1500) {
