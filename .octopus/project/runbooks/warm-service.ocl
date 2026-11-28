@@ -1,15 +1,11 @@
 name = "Warm service"
-default_guided_failure_mode = "EnvironmentDefault"
+default_guided_failure_mode = "Off"
 description = "Warms one service through the production broker (POST /services/{id}/warm). Prompts for the service id and whether to force."
 environment_scope = "Specified"
 environments = ["production"]
 
 connectivity_policy {
     allow_deployments_to_no_targets = true
-}
-
-run_retention_policy {
-    quantity_to_keep = 100
 }
 
 process {

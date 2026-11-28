@@ -4,6 +4,11 @@ Notable changes to `argus-iris`. Versions come from git tags via `hatch-vcs`.
 
 ## [Unreleased]
 
+### Added
+
+- **Octopus runbooks** (#65) as OCL in [.octopus/project/runbooks/](.octopus/project/runbooks/): evict resident, warm service, restart agent and an hourly health check (scheduled by Terraform).
+
+
 ## [0.2.3] - 2026-11-27
 
 ### Added

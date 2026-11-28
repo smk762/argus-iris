@@ -86,14 +86,23 @@ no previous config (the first deployment).
 
 ## Runbooks
 
-Same prelude; run on tag `iris-broker` unless noted.
+They are OCL too, one file each in [project/runbooks/](project/runbooks/), and run on Production only. Same prelude;
+each runs on tag `iris-broker` unless noted. The prompted variables are in `variables.ocl`, scoped to their runbook, so
+a deployment never asks for them.
 
-| Runbook | Prompted variables | Script |
+| Runbook | Prompted variables | Calls |
 |---|---|---|
 | Evict resident | `RESIDENT_ID`, `EVICT_MODE` (auto, evict, unload) | `RUNBOOK=evict bash "$REPO_DIR/.octopus/runbooks/broker-call.sh"` |
 | Warm service | `SERVICE_ID`, `WARM_FORCE` | `RUNBOOK=warm bash "$REPO_DIR/.octopus/runbooks/broker-call.sh"` |
-| Restart agent | target (tag `iris-agent`) | `bash "$REPO_DIR/.octopus/runbooks/restart-agent.sh"` |
-| Health check | (scheduled hourly, Production) | `bash "$REPO_DIR/.octopus/runbooks/health-check.sh"` |
+| Restart agent | none; pick the targets when running it (tag `iris-agent`, one at a time) | `bash "$REPO_DIR/.octopus/runbooks/restart-agent.sh"` |
+| Health check | none; scheduled hourly | `IRIS_SKIP_VERSION=1 bash "$REPO_DIR/.octopus/scripts/verify.sh"` |
+
+Guided failure is off for all four, whatever the environment says: Production has it on, and a failed hourly health
+check would otherwise wait for a person and hold up the next one.
+
+A runbook has no release. It takes the newest `iris-src` package, and its own OCL from the branch it is run on (any
+branch by hand; a schedule always uses the default branch). The hourly schedule is Terraform's: once the runbook is on
+`dev`, set `TF_VAR_health_check_trigger=true` in `.env` and apply.
 
 ## By hand
 

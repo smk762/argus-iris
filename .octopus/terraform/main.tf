@@ -135,3 +135,21 @@ resource "octopusdeploy_external_feed_create_release_trigger" "ghcr" {
     package_reference      = "argus-iris"
   }
 }
+
+# The hourly health check. The runbook itself is Config as Code (.octopus/project/runbooks/health-check.ocl), so it is
+# named by its slug, and a trigger always runs it from the default branch: it must be merged there first.
+resource "octopusdeploy_project_scheduled_trigger" "health_check" {
+  count       = var.health_check_trigger ? 1 : 0
+  space_id    = local.space_id
+  project_id  = octopusdeploy_project.iris.id
+  name        = "Hourly health check"
+  description = "Runs the Health check runbook against Production on the hour."
+
+  cron_expression_schedule {
+    cron_expression = "0 0 * * * *" # seconds first
+  }
+  run_runbook_action {
+    runbook_id             = "health-check"
+    target_environment_ids = [octopusdeploy_environment.production.id]
+  }
+}
