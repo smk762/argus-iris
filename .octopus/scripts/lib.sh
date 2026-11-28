@@ -3,6 +3,11 @@
 # step starts, so each step's inline script exports what these need first (.octopus/README.md, "Steps").
 set -euo pipefail
 
+# Where the broker and the agent share one compose project (the root compose.yaml starts both as `argus-iris`), each of
+# these scripts runs one compose file and compose calls the other's container an orphan, on stderr, which Octopus
+# marks as a warning on a healthy step. They are not orphans.
+export COMPOSE_IGNORE_ORPHANS=1
+
 # var NAME [DEFAULT]: $NAME, else DEFAULT, else fail.
 var() {
   local value=${!1:-}
