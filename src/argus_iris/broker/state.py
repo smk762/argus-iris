@@ -18,10 +18,10 @@ import httpx
 import structlog
 
 from argus_iris.broker.adapters import ServiceReading, build_adapter
-from argus_iris.broker.config import BrokerConfig, NodeConfig, ServiceConfig
+from argus_iris.broker.config import BrokerConfig, NodeConfig, ServiceConfig, report_only
 from argus_iris.broker.directory import Directory, own_container_id
 from argus_iris.broker.leases import LeaseBook, LeaseRecord
-from argus_iris.broker.policy import Policy
+from argus_iris.broker.policy import Policy, unenforce
 from argus_iris.broker.registry import Registry
 from argus_iris.broker.residency import Residency
 from argus_iris.models import (
@@ -244,6 +244,9 @@ class Broker:
     ) -> None:
         self.config = config
         self.policy = policy or Policy()
+        if report_only():  # also for a config and policy that did not come through load_config/load_policy
+            config.admission = "observe"
+            unenforce(self.policy)
         # What a confirmed eviction left each resident holding. Until it grows past that (a model loaded again) the
         # resident counts as evicted: ComfyUI keeps a few hundred MB after /free and says nothing about its models.
         self.residuals: dict[str, int] = {}

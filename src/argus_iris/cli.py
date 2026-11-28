@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import typer
+try:
+    import typer
+except ModuleNotFoundError as exc:
+    if exc.name != "typer":
+        raise
+    raise SystemExit(
+        "The argus-iris command needs the cli extra: "
+        "pip install 'argus-iris[server,cli]' (broker) or 'argus-iris[agent,cli]' (node agent)"
+    ) from None
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="VRAM-aware GPU lease broker for the Argus suite.")
 
@@ -46,6 +54,81 @@ def agent(
     from argus_iris.agent.app import create_app  # noqa: PLC0415
 
     uvicorn.run(create_app(), host=host, port=port)
+
+
+@app.command()
+def check(
+    config: Path = typer.Option(..., "--config", "-c", help="Broker YAML config to validate."),
+    policy: Path = typer.Option(None, "--policy", help="Residency policy YAML to validate."),
+    previous_config: Path = typer.Option(None, help="The config deployed now, to compare against."),
+    previous_policy: Path = typer.Option(None, help="The policy deployed now, to compare against."),
+) -> None:
+    """Validate a config and policy with this release's code, without starting anything; print a JSON summary.
+
+    With the files deployed now, ``approval`` lists what makes the change need a person to look at it (#65): another
+    difference at all between the old and the new config or policy, as this release reads them (so a comment or a
+    default spelled out is not one). Exits 1 when a new file does not load; a deployed file this release no longer
+    reads cannot be compared, so it needs approval instead.
+    """
+    import json  # noqa: PLC0415
+
+    from argus_iris.broker.config import load_config  # noqa: PLC0415
+    from argus_iris.broker.policy import Policy, load_policy  # noqa: PLC0415
+
+    def summary(cfg_path: Path, pol_path: Path | None) -> dict:
+        cfg = load_config(cfg_path)
+        pol = load_policy(pol_path) if pol_path else Policy()
+        enforced = [r.model_dump(mode="json", exclude_none=True) for r in pol.residents if r.enforce]
+        return {
+            "admission": cfg.admission,
+            "nodes": sorted(cfg.nodes),
+            "enforced": enforced,
+            "_config": cfg.model_dump(mode="json"),
+            "_policy": pol.model_dump(mode="json"),
+        }
+
+    def changed(old: dict, new: dict) -> list[str]:
+        return sorted(k for k in old.keys() | new.keys() if old.get(k) != new.get(k))
+
+    try:
+        new = summary(config, policy)
+    except Exception as exc:  # noqa: BLE001 - any load failure is the answer, printed for the deploy log
+        typer.echo(f"invalid: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    approval: list[str] = []
+    old = None
+    unreadable = False
+    if previous_config and previous_config.exists():
+        # The deployed files were written for the release running now. One this release no longer reads (a removed
+        # key, a policy file that was never written) must not block the deployment that replaces it.
+        try:
+            old = summary(previous_config, previous_policy if previous_policy and previous_policy.exists() else None)
+        except Exception as exc:  # noqa: BLE001
+            unreadable = True
+            typer.echo(f"previous files do not load: {exc}", err=True)
+    if unreadable:
+        approval.append("the deployed config or policy does not load with this release: nothing to compare against")
+    elif old is None:
+        approval.append("no previous config to compare against")
+    else:
+        # Any difference needs a person (#65): rules are first-match, so even a reorder changes what governs a
+        # resident, and config fields such as evict_by or lease_stall_reclaim let admission act. The first two lines
+        # name the changes that matter most; the last two catch everything else.
+        if new["admission"] != old["admission"]:
+            approval.append(f"admission {old['admission']} -> {new['admission']}")
+        approval += [
+            f"enforced rule new or changed: {json.dumps(r['match'])}"
+            for r in new["enforced"]
+            if r not in old["enforced"]
+        ]
+        config_keys = [k for k in changed(old["_config"], new["_config"]) if k != "admission"]
+        if config_keys:
+            approval.append(f"config changed: {', '.join(config_keys)}")
+        policy_keys = changed(old["_policy"], new["_policy"])
+        if policy_keys:
+            approval.append(f"policy changed: {', '.join(policy_keys)}")
+    shown = {k: v for k, v in new.items() if not k.startswith("_")}
+    typer.echo(json.dumps({**shown, "approval": approval}, indent=2))
 
 
 @app.command()

@@ -1,0 +1,10 @@
+cancel_queued_tasks = true
+cancel_running_tasks = true
+
+connectivity_policy {
+    target_roles = ["iris-broker", "iris-agent"]
+}
+
+versioning_strategy {
+    template = "#{Octopus.Version.LastMajor}.#{Octopus.Version.LastMinor}.#{Octopus.Version.NextPatch}"
+}

@@ -139,6 +139,16 @@ def test_no_policy_file_is_an_empty_policy(monkeypatch, tmp_path):
     assert load_policy().residents[0].idle_kill == 300
 
 
+def test_report_only_unenforces_every_rule(monkeypatch, tmp_path):
+    f = tmp_path / "policy.yaml"
+    f.write_text("residents:\n  - match: {node: rtx4060}\n    idle_kill: 5m\n    enforce: true\n")
+    monkeypatch.delenv("IRIS_REPORT_ONLY", raising=False)
+    assert load_policy(f).residents[0].enforce
+    monkeypatch.setenv("IRIS_REPORT_ONLY", "true")
+    rule = load_policy(f).residents[0]
+    assert not rule.enforce and rule.idle_kill == 300  # still reported: the dashboard shows what it would do
+
+
 # --- residency on a fake rtx4060 (idle 60 s everywhere) -------------------------------------------------------------
 
 
