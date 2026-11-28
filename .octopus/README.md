@@ -62,14 +62,16 @@ Every script step is *Run a Script* (bash, inline), references the **GitHub rele
 `smk762/argus-iris` (extracted, reference name `iris-src`), and starts with a prelude: Octopus defines
 `get_octopusvariable` only in the step's own shell, so it exports what the script needs, then finds the extracted
 source (`Octopus.Action.Package[iris-src].ExtractedPath`, or the one folder inside it) as `REPO_DIR`.
+Scripts run through `bash`: the source package is GitHub's zip of the tag, which carries no file modes, so nothing
+in it is executable.
 
 | # | Step | Runs on | Environments | Then |
 |---|---|---|---|---|
-| 1 | Render broker config | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/render-config.sh"` |
+| 1 | Render broker config | tag `iris-broker` | both | `bash "$REPO_DIR/.octopus/scripts/render-config.sh"` |
 | 2 | Approve policy change | Manual intervention; run condition `#{Octopus.Action[Render broker config].Output.NeedsApproval}`; instructions show `#{Octopus.Action[Render broker config].Output.ApprovalReasons}` | Production | |
-| 3 | Deploy agents | tag `iris-agent`, rolling, window 1 | Production | `"$REPO_DIR/.octopus/scripts/deploy-agent.sh"` |
-| 4 | Deploy broker | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/deploy-broker.sh"` |
-| 5 | Verify | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/verify.sh"` |
+| 3 | Deploy agents | tag `iris-agent`, rolling, window 1 | Production | `bash "$REPO_DIR/.octopus/scripts/deploy-agent.sh"` |
+| 4 | Deploy broker | tag `iris-broker` | both | `bash "$REPO_DIR/.octopus/scripts/deploy-broker.sh"` |
+| 5 | Verify | tag `iris-broker` | both | `bash "$REPO_DIR/.octopus/scripts/verify.sh"` |
 
 Step 1 also references the **GHCR** feed package `smk762/argus-iris` as `argus-iris` (not acquired). Its version becomes
 `IRIS_TAG` and the release trigger watches it.
@@ -88,10 +90,10 @@ Same prelude; run on tag `iris-broker` unless noted.
 
 | Runbook | Prompted variables | Script |
 |---|---|---|
-| Evict resident | `RESIDENT_ID`, `EVICT_MODE` (auto, evict, unload) | `RUNBOOK=evict "$REPO_DIR/.octopus/runbooks/broker-call.sh"` |
-| Warm service | `SERVICE_ID`, `WARM_FORCE` | `RUNBOOK=warm "$REPO_DIR/.octopus/runbooks/broker-call.sh"` |
-| Restart agent | target (tag `iris-agent`) | `"$REPO_DIR/.octopus/runbooks/restart-agent.sh"` |
-| Health check | (scheduled hourly, Production) | `"$REPO_DIR/.octopus/runbooks/health-check.sh"` |
+| Evict resident | `RESIDENT_ID`, `EVICT_MODE` (auto, evict, unload) | `RUNBOOK=evict bash "$REPO_DIR/.octopus/runbooks/broker-call.sh"` |
+| Warm service | `SERVICE_ID`, `WARM_FORCE` | `RUNBOOK=warm bash "$REPO_DIR/.octopus/runbooks/broker-call.sh"` |
+| Restart agent | target (tag `iris-agent`) | `bash "$REPO_DIR/.octopus/runbooks/restart-agent.sh"` |
+| Health check | (scheduled hourly, Production) | `bash "$REPO_DIR/.octopus/runbooks/health-check.sh"` |
 
 ## By hand
 
