@@ -4,10 +4,22 @@ Notable changes to `argus-iris`. Versions come from git tags via `hatch-vcs`.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-28
+
+Deployment tooling only: the package code is the same as 0.2.3.
+
 ### Added
 
 - **Octopus runbooks** (#65) as OCL in [.octopus/project/runbooks/](.octopus/project/runbooks/): evict resident, warm service, restart agent and an hourly health check (scheduled by Terraform).
 
+### Changed
+
+- The Octopus broker deploy no longer restarts the broker when the rendered config and policy are byte for byte the deployed ones; compose then recreates it only for a new image or environment.
+
+### Fixed
+
+- Octopus steps call the deploy scripts through `bash`: GitHub's tag archive carries no file modes, so they were not executable on the target.
+- Docker's pull and start progress no longer goes to stderr, where Octopus marked healthy steps as finished with warnings.
 
 ## [0.2.3] - 2026-11-27
 

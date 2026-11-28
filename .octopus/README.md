@@ -79,6 +79,9 @@ Step 1 also references the **GHCR** feed package `smk762/argus-iris` as `argus-i
 Nothing on a host changes before the approval: step 1 only writes `.next` files beside the deployed ones. A rejected
 change therefore leaves the agents and the broker on the release they were running.
 
+`deploy-broker.sh` swaps the files in and recreates the broker. When both files are byte for byte the deployed ones it
+leaves the container to compose, so a release that changes neither the image nor the config does not restart it.
+
 `render-config.sh` validates the new files with `argus-iris check`, run from the release's own image. A file that
 does not load fails the deployment before the running broker restarts. Approval is needed when the config or policy
 differs at all from the deployed one as the broker reads it, when the deployed files no longer load, or when there is
