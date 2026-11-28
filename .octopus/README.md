@@ -3,6 +3,9 @@
 Issue [#65](https://github.com/smk762/argus-iris/issues/65). Octopus Cloud deploys the broker and the agents through
 polling Tentacles: Staging (a report-only broker on `:8121`), then Production (the broker on `:8120` and every agent).
 
+Why it was done, what was tested against production and what it cost:
+[Moving a GPU broker from hand-run compose to Octopus Deploy](https://dragonhound.dev/updates/2026-11-28-iris-octopus-deploy/).
+
 | Path | What | Managed by |
 |---|---|---|
 | `terraform/` | Space, environments, lifecycle, GHCR and GitHub feeds, Git credential, project, release trigger | Terraform |

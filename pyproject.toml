@@ -64,6 +64,7 @@ argus-iris = "argus_iris.cli:app"
 Homepage = "https://iris.dragonhound.dev"
 Repository = "https://github.com/smk762/argus-iris"
 Changelog = "https://github.com/smk762/argus-iris/blob/dev/CHANGELOG.md"
+"Deploying with Octopus" = "https://dragonhound.dev/updates/2026-11-28-iris-octopus-deploy/"
 
 [tool.hatch.version]
 source = "vcs"
