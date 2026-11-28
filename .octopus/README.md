@@ -62,20 +62,25 @@ Every script step is *Run a Script* (bash, inline), references the **GitHub rele
 `smk762/argus-iris` (extracted, reference name `iris-src`), and starts with a prelude: Octopus defines
 `get_octopusvariable` only in the step's own shell, so it exports what the script needs, then finds the extracted
 source (`Octopus.Action.Package[iris-src].ExtractedPath`, or the one folder inside it) as `REPO_DIR`.
+Scripts run through `bash`: Octopus repackages the tag's source archive for the GitHub feed (no top-level folder,
+every file mode 0644), so nothing in the package is executable, although GitHub's own zip keeps the execute bits.
 
 | # | Step | Runs on | Environments | Then |
 |---|---|---|---|---|
-| 1 | Render broker config | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/render-config.sh"` |
+| 1 | Render broker config | tag `iris-broker` | both | `bash "$REPO_DIR/.octopus/scripts/render-config.sh"` |
 | 2 | Approve policy change | Manual intervention; run condition `#{Octopus.Action[Render broker config].Output.NeedsApproval}`; instructions show `#{Octopus.Action[Render broker config].Output.ApprovalReasons}` | Production | |
-| 3 | Deploy agents | tag `iris-agent`, rolling, window 1 | Production | `"$REPO_DIR/.octopus/scripts/deploy-agent.sh"` |
-| 4 | Deploy broker | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/deploy-broker.sh"` |
-| 5 | Verify | tag `iris-broker` | both | `"$REPO_DIR/.octopus/scripts/verify.sh"` |
+| 3 | Deploy agents | tag `iris-agent`, rolling, window 1 | Production | `bash "$REPO_DIR/.octopus/scripts/deploy-agent.sh"` |
+| 4 | Deploy broker | tag `iris-broker` | both | `bash "$REPO_DIR/.octopus/scripts/deploy-broker.sh"` |
+| 5 | Verify | tag `iris-broker` | both | `bash "$REPO_DIR/.octopus/scripts/verify.sh"` |
 
 Step 1 also references the **GHCR** feed package `smk762/argus-iris` as `argus-iris` (not acquired). Its version becomes
 `IRIS_TAG` and the release trigger watches it.
 
 Nothing on a host changes before the approval: step 1 only writes `.next` files beside the deployed ones. A rejected
 change therefore leaves the agents and the broker on the release they were running.
+
+`deploy-broker.sh` swaps the files in and recreates the broker. When both files are byte for byte the deployed ones it
+leaves the container to compose, so a release that changes neither the image nor the config does not restart it.
 
 `render-config.sh` validates the new files with `argus-iris check`, run from the release's own image. A file that
 does not load fails the deployment before the running broker restarts. Approval is needed when the config or policy
@@ -84,14 +89,23 @@ no previous config (the first deployment).
 
 ## Runbooks
 
-Same prelude; run on tag `iris-broker` unless noted.
+They are OCL too, one file each in [project/runbooks/](project/runbooks/), and run on Production only. Same prelude;
+each runs on tag `iris-broker` unless noted. The prompted variables are in `variables.ocl`, scoped to their runbook, so
+a deployment never asks for them.
 
-| Runbook | Prompted variables | Script |
+| Runbook | Prompted variables | Calls |
 |---|---|---|
-| Evict resident | `RESIDENT_ID`, `EVICT_MODE` (auto, evict, unload) | `RUNBOOK=evict "$REPO_DIR/.octopus/runbooks/broker-call.sh"` |
-| Warm service | `SERVICE_ID`, `WARM_FORCE` | `RUNBOOK=warm "$REPO_DIR/.octopus/runbooks/broker-call.sh"` |
-| Restart agent | target (tag `iris-agent`) | `"$REPO_DIR/.octopus/runbooks/restart-agent.sh"` |
-| Health check | (scheduled hourly, Production) | `"$REPO_DIR/.octopus/runbooks/health-check.sh"` |
+| Evict resident | `RESIDENT_ID`, `EVICT_MODE` (auto, evict, unload) | `RUNBOOK=evict bash "$REPO_DIR/.octopus/runbooks/broker-call.sh"` |
+| Warm service | `SERVICE_ID`, `WARM_FORCE` | `RUNBOOK=warm bash "$REPO_DIR/.octopus/runbooks/broker-call.sh"` |
+| Restart agent | none; pick the targets when running it (tag `iris-agent`, one at a time) | `bash "$REPO_DIR/.octopus/runbooks/restart-agent.sh"` |
+| Health check | none; scheduled hourly | `IRIS_SKIP_VERSION=1 bash "$REPO_DIR/.octopus/scripts/verify.sh"` |
+
+Guided failure is off for all four, whatever the environment says: Production has it on, and a failed hourly health
+check would otherwise wait for a person and hold up the next one.
+
+A runbook has no release. It takes the newest `iris-src` package, and its own OCL from the branch it is run on (any
+branch by hand; a schedule always uses the default branch). The hourly schedule is Terraform's: once the runbook is on
+`dev`, set `TF_VAR_health_check_trigger=true` in `.env` and apply.
 
 ## By hand
 

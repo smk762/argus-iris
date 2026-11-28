@@ -49,3 +49,9 @@ variable "release_trigger_step" {
   type        = string
   default     = "render-broker-config"
 }
+
+variable "health_check_trigger" {
+  description = "Schedule the Health check runbook hourly. Leave false until its OCL is on the default branch."
+  type        = bool
+  default     = false
+}

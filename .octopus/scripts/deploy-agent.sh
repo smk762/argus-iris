@@ -31,8 +31,8 @@ else
   project=argus-iris
 fi
 echo "compose project: $project"
-docker compose -p "$project" -f "$repo/deploy/agent.compose.yaml" pull iris-agent
-docker compose -p "$project" -f "$repo/deploy/agent.compose.yaml" up -d --no-build iris-agent
+docker compose --progress quiet -p "$project" -f "$repo/deploy/agent.compose.yaml" pull iris-agent
+docker compose --progress quiet -p "$project" -f "$repo/deploy/agent.compose.yaml" up -d --no-build iris-agent
 
 health=$(wait_health "http://$(local_ip):9110/health" 60)
 version=$(json_get version <<<"$health")

@@ -31,19 +31,31 @@ case "$env_name" in
   *) echo "unknown environment: $env_name" >&2; exit 2 ;;
 esac
 
-docker compose -p "$project" -f "$repo/deploy/$file" pull "$service"
+docker compose --progress quiet -p "$project" -f "$repo/deploy/$file" pull "$service"
 
 # Swap only once the image is here, and file by file, so a retry of this step (a failed pull or up) picks up where it
-# stopped: a file with no .next was already swapped in.
+# stopped: a file with no .next was already swapped in. `changed` stays 0 only when both files were rendered and are
+# byte for byte the deployed ones; a retry cannot tell, so it counts as changed.
+changed=0
 for f in iris.yaml policy.yaml; do
   if [ -f "$root/$f.next" ]; then
+    if [ -f "$root/$f" ] && cmp -s "$root/$f" "$root/$f.next"; then
+      rm -f "$root/$f.next"
+      continue
+    fi
+    changed=1
     if [ -f "$root/$f" ]; then cp -p "$root/$f" "$root/$f.prev"; fi
     mv "$root/$f.next" "$root/$f"
   else
+    changed=1
     echo "$root/$f.next is gone: $f was already swapped in"
   fi
 done
 
-# Always recreate: each file is bind-mounted by inode, so the mv above leaves a running container on the old one, and
-# compose sees nothing to change when only the files did (the same image, a config-only release).
-docker compose -p "$project" -f "$repo/deploy/$file" up -d --force-recreate "$service"
+# Each file is bind-mounted by inode, so the mv above leaves a running container on the old one, and compose sees
+# nothing to change when only the files did (the same image, a config-only release): recreate. With both files
+# unchanged, leave it to compose, which recreates only for a new image or environment, so a release that changes
+# nothing does not restart the broker.
+recreate=()
+if [ "$changed" = 1 ]; then recreate=(--force-recreate); else echo "config and policy unchanged: no forced restart"; fi
+docker compose --progress quiet -p "$project" -f "$repo/deploy/$file" up -d "${recreate[@]}" "$service"

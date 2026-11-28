@@ -14,7 +14,7 @@ step "render-broker-config" {
                 src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")
                 if [ -d "$src/.octopus" ]; then REPO_DIR=$src; else REPO_DIR=$(ls -d "$src"/*/ | head -n1); REPO_DIR=${REPO_DIR%/}; fi
                 export IRIS_IN_OCTOPUS=1 REPO_DIR
-                "$REPO_DIR/.octopus/scripts/render-config.sh"
+                bash "$REPO_DIR/.octopus/scripts/render-config.sh"
                 EOT
             Octopus.Action.Script.ScriptSource = "Inline"
             Octopus.Action.Script.Syntax = "Bash"
@@ -90,7 +90,7 @@ step "deploy-agents" {
                 src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")
                 if [ -d "$src/.octopus" ]; then REPO_DIR=$src; else REPO_DIR=$(ls -d "$src"/*/ | head -n1); REPO_DIR=${REPO_DIR%/}; fi
                 export IRIS_IN_OCTOPUS=1 REPO_DIR
-                "$REPO_DIR/.octopus/scripts/deploy-agent.sh"
+                bash "$REPO_DIR/.octopus/scripts/deploy-agent.sh"
                 EOT
             Octopus.Action.Script.ScriptSource = "Inline"
             Octopus.Action.Script.Syntax = "Bash"
@@ -127,7 +127,7 @@ step "deploy-broker" {
                 src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")
                 if [ -d "$src/.octopus" ]; then REPO_DIR=$src; else REPO_DIR=$(ls -d "$src"/*/ | head -n1); REPO_DIR=${REPO_DIR%/}; fi
                 export IRIS_IN_OCTOPUS=1 REPO_DIR
-                "$REPO_DIR/.octopus/scripts/deploy-broker.sh"
+                bash "$REPO_DIR/.octopus/scripts/deploy-broker.sh"
                 EOT
             Octopus.Action.Script.ScriptSource = "Inline"
             Octopus.Action.Script.Syntax = "Bash"
@@ -163,7 +163,7 @@ step "verify" {
                 src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")
                 if [ -d "$src/.octopus" ]; then REPO_DIR=$src; else REPO_DIR=$(ls -d "$src"/*/ | head -n1); REPO_DIR=${REPO_DIR%/}; fi
                 export IRIS_IN_OCTOPUS=1 REPO_DIR
-                "$REPO_DIR/.octopus/scripts/verify.sh"
+                bash "$REPO_DIR/.octopus/scripts/verify.sh"
                 EOT
             Octopus.Action.Script.ScriptSource = "Inline"
             Octopus.Action.Script.Syntax = "Bash"
