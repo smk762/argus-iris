@@ -25,3 +25,52 @@ variable "IRIS_PORT" {
 variable "IRIS_TAG" {
     value "#{Octopus.Action[Render broker config].Package[argus-iris].PackageVersion}" {}
 }
+
+
+variable "EVICT_MODE" {
+    value "auto" {
+        process = ["runbook/evict-resident"]
+
+        prompt {
+            description = "auto, evict or unload"
+            label = "Mode"
+            required = true
+        }
+    }
+}
+
+variable "RESIDENT_ID" {
+    value "" {
+        process = ["runbook/evict-resident"]
+
+        prompt {
+            description = "As /residents lists it, e.g. node/service/model"
+            label = "Resident id"
+            required = true
+        }
+    }
+}
+
+variable "SERVICE_ID" {
+    value "" {
+        process = ["runbook/warm-service"]
+
+        prompt {
+            description = "As /services lists it"
+            label = "Service id"
+            required = true
+        }
+    }
+}
+
+variable "WARM_FORCE" {
+    value "false" {
+        process = ["runbook/warm-service"]
+
+        prompt {
+            description = "true warms even when the node cannot admit it"
+            label = "Force"
+            required = true
+        }
+    }
+}

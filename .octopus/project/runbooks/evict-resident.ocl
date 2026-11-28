@@ -1,0 +1,48 @@
+name = "Evict resident"
+default_guided_failure_mode = "Off"
+description = "Evicts one resident through the production broker (POST /residents/{id}/evict). Prompts for the resident id and the mode."
+environment_scope = "Specified"
+environments = ["production"]
+
+connectivity_policy {
+    allow_deployments_to_no_targets = true
+}
+
+process {
+    step "evict-resident" {
+        name = "Evict resident"
+        properties = {
+
+            Octopus.Action.TargetRoles = "iris-broker"
+        }
+
+        action {
+            action_type = "Octopus.Script"
+            properties = {
+                Octopus.Action.Script.ScriptBody = <<-EOT
+                    for v in IRIS_PORT HOST_IP ARGUS_GPU_BROKER_TOKEN RESIDENT_ID EVICT_MODE; do
+                      val=$(get_octopusvariable "$v"); [ -n "$val" ] && export "$v=$val"
+                    done
+                    src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")
+                    if [ -d "$src/.octopus" ]; then REPO_DIR=$src; else REPO_DIR=$(ls -d "$src"/*/ | head -n1); REPO_DIR=${REPO_DIR%/}; fi
+                    export IRIS_IN_OCTOPUS=1 REPO_DIR
+                    RUNBOOK=evict bash "$REPO_DIR/.octopus/runbooks/broker-call.sh"
+                    EOT
+                Octopus.Action.Script.ScriptSource = "Inline"
+                Octopus.Action.Script.Syntax = "Bash"
+            }
+            worker_pool_variable = ""
+
+            packages "iris-src" {
+                acquisition_location = "Server"
+                feed = "github-releases"
+                package_id = "smk762/argus-iris"
+                properties = {
+                    Extract = "True"
+                    Purpose = ""
+                    SelectionMode = "immediate"
+                }
+            }
+        }
+    }
+}
