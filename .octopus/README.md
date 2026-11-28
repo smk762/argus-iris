@@ -62,8 +62,8 @@ Every script step is *Run a Script* (bash, inline), references the **GitHub rele
 `smk762/argus-iris` (extracted, reference name `iris-src`), and starts with a prelude: Octopus defines
 `get_octopusvariable` only in the step's own shell, so it exports what the script needs, then finds the extracted
 source (`Octopus.Action.Package[iris-src].ExtractedPath`, or the one folder inside it) as `REPO_DIR`.
-Scripts run through `bash`: the source package is GitHub's zip of the tag, which carries no file modes, so nothing
-in it is executable.
+Scripts run through `bash`: Octopus repackages the tag's source archive for the GitHub feed (no top-level folder,
+every file mode 0644), so nothing in the package is executable, although GitHub's own zip keeps the execute bits.
 
 | # | Step | Runs on | Environments | Then |
 |---|---|---|---|---|

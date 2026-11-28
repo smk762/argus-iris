@@ -18,7 +18,7 @@ Deployment tooling only: the package code is the same as 0.2.3.
 
 ### Fixed
 
-- Octopus steps call the deploy scripts through `bash`: GitHub's tag archive carries no file modes, so they were not executable on the target.
+- Octopus steps call the deploy scripts through `bash`: the package Octopus builds from a GitHub tag drops the execute bits (GitHub's own archive has them), so the scripts were not executable on the target.
 - Docker's pull and start progress no longer goes to stderr, where Octopus marked healthy steps as finished with warnings.
 
 ## [0.2.3] - 2026-11-27
