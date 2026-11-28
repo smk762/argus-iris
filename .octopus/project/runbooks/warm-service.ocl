@@ -1,0 +1,52 @@
+name = "Warm service"
+default_guided_failure_mode = "EnvironmentDefault"
+description = "Warms one service through the production broker (POST /services/{id}/warm). Prompts for the service id and whether to force."
+environment_scope = "Specified"
+environments = ["production"]
+
+connectivity_policy {
+    allow_deployments_to_no_targets = true
+}
+
+run_retention_policy {
+    quantity_to_keep = 100
+}
+
+process {
+    step "warm-service" {
+        name = "Warm service"
+        properties = {
+
+            Octopus.Action.TargetRoles = "iris-broker"
+        }
+
+        action {
+            action_type = "Octopus.Script"
+            properties = {
+                Octopus.Action.Script.ScriptBody = <<-EOT
+                    for v in IRIS_PORT HOST_IP ARGUS_GPU_BROKER_TOKEN SERVICE_ID WARM_FORCE; do
+                      val=$(get_octopusvariable "$v"); [ -n "$val" ] && export "$v=$val"
+                    done
+                    src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")
+                    if [ -d "$src/.octopus" ]; then REPO_DIR=$src; else REPO_DIR=$(ls -d "$src"/*/ | head -n1); REPO_DIR=${REPO_DIR%/}; fi
+                    export IRIS_IN_OCTOPUS=1 REPO_DIR
+                    RUNBOOK=warm bash "$REPO_DIR/.octopus/runbooks/broker-call.sh"
+                    EOT
+                Octopus.Action.Script.ScriptSource = "Inline"
+                Octopus.Action.Script.Syntax = "Bash"
+            }
+            worker_pool_variable = ""
+
+            packages "iris-src" {
+                acquisition_location = "Server"
+                feed = "github-releases"
+                package_id = "smk762/argus-iris"
+                properties = {
+                    Extract = "True"
+                    Purpose = ""
+                    SelectionMode = "immediate"
+                }
+            }
+        }
+    }
+}

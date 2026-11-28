@@ -1,0 +1,52 @@
+name = "Restart agent"
+default_guided_failure_mode = "EnvironmentDefault"
+description = "Restarts iris-agent on the chosen targets, one at a time, and waits for each to answer. Pick the targets when running it."
+environment_scope = "Specified"
+environments = ["production"]
+
+connectivity_policy {
+    allow_deployments_to_no_targets = true
+}
+
+run_retention_policy {
+    quantity_to_keep = 100
+}
+
+process {
+    step "restart-agent" {
+        name = "Restart agent"
+        properties = {
+            Octopus.Action.MaxParallelism = "1"
+            Octopus.Action.TargetRoles = "iris-agent"
+        }
+
+        action {
+            action_type = "Octopus.Script"
+            properties = {
+                Octopus.Action.Script.ScriptBody = <<-EOT
+                    for v in HOST_IP; do
+                      val=$(get_octopusvariable "$v"); [ -n "$val" ] && export "$v=$val"
+                    done
+                    src=$(get_octopusvariable "Octopus.Action.Package[iris-src].ExtractedPath")
+                    if [ -d "$src/.octopus" ]; then REPO_DIR=$src; else REPO_DIR=$(ls -d "$src"/*/ | head -n1); REPO_DIR=${REPO_DIR%/}; fi
+                    export IRIS_IN_OCTOPUS=1 REPO_DIR
+                    bash "$REPO_DIR/.octopus/runbooks/restart-agent.sh"
+                    EOT
+                Octopus.Action.Script.ScriptSource = "Inline"
+                Octopus.Action.Script.Syntax = "Bash"
+            }
+            worker_pool_variable = ""
+
+            packages "iris-src" {
+                acquisition_location = "Server"
+                feed = "github-releases"
+                package_id = "smk762/argus-iris"
+                properties = {
+                    Extract = "True"
+                    Purpose = ""
+                    SelectionMode = "immediate"
+                }
+            }
+        }
+    }
+}
